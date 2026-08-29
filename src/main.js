@@ -1,0 +1,1282 @@
+// Fungred 复刻版 —— Three.js 场景 / 表现层 / UI
+import * as THREE from '../three.module.js';
+import { HEROES, KEI, WORLD } from './data.js';
+import {
+  game, fxQueue, initGame, createHero, allHeroes, opposite,
+  attack, castSkill, validateTarget, playerSummon,
+  runEnemyTurnAndPrepare, heroDieCleanup, LANES, LANE_CAP,
+} from './game.js';
+import { sfx, unlockAudio } from './audio.js';
+
+addEventListener('pointerdown', unlockAudio, { once: true });
+addEventListener('keydown', unlockAudio, { once: true });
+
+const $ = s => document.querySelector(s);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const clamp01 = x => Math.max(0, Math.min(1, x));
+const easeOut = t => 1 - Math.pow(1 - t, 3);
+const easeIn = t => t * t * t;
+// 页面隐藏时 rAF 不触发、setTimeout 被浏览器节流，
+// 因此隐藏状态下所有动画直接跳到最终状态（无头测试也因此瞬时完成）
+const nextFrame = cb => document.hidden
+  ? setTimeout(() => cb(performance.now()), 100) // 隐藏时兜底触发（配合步进器的 instant 早退）
+  : requestAnimationFrame(cb);
+const instant = () => document.hidden;
+
+/* ============================================================ 渲染基础 */
+const canvas = $('#gl');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.08;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x050712);
+scene.fog = new THREE.FogExp2(0x050712, 0.02);
+
+const camera = new THREE.PerspectiveCamera(46, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 13.4, 10.8);
+camera.lookAt(0, -0.6, -0.9);
+const camBasePos = camera.position.clone();
+
+// 相机震动（基地受击等）
+let shakeLeft = 0, shakeAmp = 0;
+function shake(amp = 0.18, ms = 220) {
+  if (instant()) return;
+  shakeAmp = Math.max(shakeAmp, amp);
+  shakeLeft = Math.max(shakeLeft, ms / 1000);
+}
+
+function onResize() {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+}
+addEventListener('resize', onResize);
+onResize();
+
+scene.add(new THREE.HemisphereLight(0x93a3ff, 0x0a0a16, 0.55));
+const dirLight = new THREE.DirectionalLight(0xfff4e0, 1.5);
+dirLight.position.set(6, 14, 7);
+scene.add(dirLight);
+const youGlowL = new THREE.PointLight(0x8b9cff, 5, 14); youGlowL.position.set(0, 3.4, 5.6); scene.add(youGlowL);
+const eneGlowL = new THREE.PointLight(0xff5265, 5, 14); eneGlowL.position.set(0, 3.4, -5.6); scene.add(eneGlowL);
+
+/* ---------- 通用贴图 ---------- */
+function glowTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  const grd = g.createRadialGradient(64, 64, 2, 64, 64, 64);
+  grd.addColorStop(0, 'rgba(255,255,255,1)');
+  grd.addColorStop(0.35, 'rgba(255,255,255,0.35)');
+  grd.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grd; g.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
+}
+const TEX_GLOW = glowTexture();
+
+function runeTexture(colorCss) {
+  const S = 512;
+  const c = document.createElement('canvas'); c.width = c.height = S;
+  const g = c.getContext('2d');
+  g.strokeStyle = colorCss; g.fillStyle = colorCss;
+  g.translate(S / 2, S / 2);
+  g.lineWidth = 7;
+  g.beginPath(); g.arc(0, 0, 226, 0, Math.PI * 2); g.stroke();
+  g.lineWidth = 3;
+  g.beginPath(); g.arc(0, 0, 205, 0, Math.PI * 2); g.stroke();
+  g.beginPath(); g.arc(0, 0, 120, 0, Math.PI * 2); g.stroke();
+  // 放射刻痕 + 内三角
+  for (let i = 0; i < 24; i++) {
+    const a = i / 24 * Math.PI * 2;
+    const r1 = 205, r2 = i % 2 === 0 ? 180 : 192;
+    g.beginPath();
+    g.moveTo(Math.cos(a) * r1, Math.sin(a) * r1);
+    g.lineTo(Math.cos(a) * r2, Math.sin(a) * r2);
+    g.stroke();
+  }
+  g.lineWidth = 4;
+  for (let k = 0; k < 2; k++) {
+    g.beginPath();
+    for (let i = 0; i <= 3; i++) {
+      const a = i / 3 * Math.PI * 2 + Math.PI / 2 + k * Math.PI / 3;
+      const x = Math.cos(a) * 120, y = Math.sin(a) * 120;
+      i === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+    }
+    g.stroke();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.anisotropy = 4;
+  return tex;
+}
+
+function textTexture(text, sub) {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = 'rgba(16,20,44,0.92)';
+  g.beginPath(); g.roundRect(8, 8, 496, 240, 26); g.fill();
+  g.strokeStyle = 'rgba(139,156,255,0.55)'; g.lineWidth = 5; g.stroke();
+  g.fillStyle = '#cdd6ff';
+  g.font = '500 44px "Segoe UI", "Microsoft YaHei", sans-serif';
+  g.textAlign = 'center';
+  g.fillText(text, 256, 120);
+  if (sub) {
+    g.fillStyle = 'rgba(160,172,230,0.7)';
+    g.font = '30px "Segoe UI", "Microsoft YaHei", sans-serif';
+    g.fillText(sub, 256, 178);
+  }
+  return new THREE.CanvasTexture(c);
+}
+
+/* ---------- 星空与远景 ---------- */
+{
+  const n = 900, pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const r = 70 + Math.random() * 60;
+    const th = Math.random() * Math.PI * 2;
+    const ph = Math.acos(2 * Math.random() - 1);
+    pos[i * 3] = r * Math.sin(ph) * Math.cos(th);
+    pos[i * 3 + 1] = Math.abs(r * Math.cos(ph)) * 0.7 - 6;
+    pos[i * 3 + 2] = r * Math.sin(ph) * Math.sin(th);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(geo, new THREE.PointsMaterial({
+    size: 0.5, map: TEX_GLOW, transparent: true, opacity: 0.75,
+    depthWrite: false, blending: THREE.AdditiveBlending, color: 0xaebaff,
+  })));
+}
+// 远处星云光斑
+const nebulas = [];
+[[0x5b8cff, -34, 10, -60, 46], [0xa15bff, 30, 16, -70, 60], [0xff5265, 4, 6, -80, 40]].forEach(([col, x, y, z, s]) => {
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: TEX_GLOW, color: col, transparent: true, opacity: 0.16,
+    depthWrite: false, blending: THREE.AdditiveBlending,
+  }));
+  sp.position.set(x, y, z); sp.scale.setScalar(s);
+  scene.add(sp); nebulas.push(sp);
+});
+// 彩蛋：原版「梦想卡」漂浮在远景中
+const dreamCards = [];
+[['hello, world', 'Fungred · 2022', -10.5, 4.6, -13], ['make it.', 'cause I\'m myjs999', 10.8, 5.4, -14]].forEach(([t, s, x, y, z]) => {
+  const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(4.6, 2.3),
+    new THREE.MeshBasicMaterial({ map: textTexture(t, s), transparent: true, opacity: 0.85, depthWrite: false })
+  );
+  m.position.set(x, y, z);
+  m.rotation.x = -0.12;
+  scene.add(m); dreamCards.push(m);
+});
+
+/* ============================================================ 战场 */
+const LANE_X = [-4.35, -1.45, 1.45, 4.35];
+const PAD_Z = 2.15, BASE_Z = 5.35;
+const TOP_Y = 0.3;
+
+function heroWorldPos(h) {
+  if (h.isBase) return new THREE.Vector3(0, TOP_Y, h.side === 0 ? BASE_Z : -BASE_Z);
+  const zs = h.side === 0 ? 1 : -1;
+  return new THREE.Vector3(LANE_X[h.lane], TOP_Y, zs * PAD_Z);
+}
+
+// 悬浮石台
+{
+  const slabMat = new THREE.MeshStandardMaterial({ color: 0x141833, roughness: 0.85, metalness: 0.2 });
+  const slab = new THREE.Mesh(new THREE.BoxGeometry(14.6, 0.7, 13.6), slabMat);
+  slab.position.y = TOP_Y - 0.35;
+  scene.add(slab);
+  const under = new THREE.Mesh(new THREE.BoxGeometry(12.8, 1.4, 11.8),
+    new THREE.MeshStandardMaterial({ color: 0x0c0f24, roughness: 0.95 }));
+  under.position.y = TOP_Y - 1.35;
+  scene.add(under);
+  // 边缘光带（只露出台面四周一圈细边）
+  const edge = new THREE.Mesh(new THREE.BoxGeometry(14.7, 0.08, 13.7),
+    new THREE.MeshBasicMaterial({ color: 0x4a55b0 }));
+  edge.position.y = TOP_Y - 0.045;
+  scene.add(edge);
+  const top = new THREE.Mesh(new THREE.BoxGeometry(14.4, 0.06, 13.4),
+    new THREE.MeshStandardMaterial({ color: 0x10142e, roughness: 0.75, metalness: 0.3 }));
+  top.position.y = TOP_Y - 0.028;
+  scene.add(top);
+  // 中线
+  const mid = new THREE.Mesh(new THREE.PlaneGeometry(13.4, 0.06),
+    new THREE.MeshBasicMaterial({ color: 0x4a548f, transparent: true, opacity: 0.8 }));
+  mid.rotation.x = -Math.PI / 2;
+  mid.position.y = TOP_Y + 0.005;
+  scene.add(mid);
+  // 三条战线连线
+  for (const x of LANE_X) {
+    const lane = new THREE.Mesh(new THREE.PlaneGeometry(0.06, 2 * PAD_Z),
+      new THREE.MeshBasicMaterial({ color: 0x3a4380, transparent: true, opacity: 0.55 }));
+    lane.rotation.x = -Math.PI / 2;
+    lane.position.set(x, TOP_Y + 0.004, 0);
+    scene.add(lane);
+  }
+}
+
+// 召唤法阵（每边 3 个）
+const pads = { 0: [], 1: [] };
+const SIDE_CSS = ['rgba(139,156,255,0.95)', 'rgba(255,82,101,0.95)'];
+const SIDE_HEX = [0x8b9cff, 0xff5265];
+for (let side = 0; side < 2; side++) {
+  const tex = runeTexture(SIDE_CSS[side]);
+  for (let lane = 0; lane < LANES; lane++) {
+    const g = new THREE.Group();
+    const zs = side === 0 ? 1 : -1;
+    g.position.set(LANE_X[lane], TOP_Y + 0.012, zs * PAD_Z);
+    const disc = new THREE.Mesh(new THREE.CircleGeometry(1.06, 48),
+      new THREE.MeshBasicMaterial({
+        map: tex, transparent: true, opacity: 0.5,
+        depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+      }));
+    disc.rotation.x = -Math.PI / 2;
+    g.add(disc);
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(1.1, 0.028, 10, 60),
+      new THREE.MeshBasicMaterial({ color: SIDE_HEX[side], transparent: true, opacity: 0.65 }));
+    ring.rotation.x = Math.PI / 2;
+    ring.position.y = 0.02;
+    g.add(ring);
+    g.userData = { side, lane, disc, ring, spin: (side ? -1 : 1) * (0.15 + lane * 0.03) };
+    disc.userData.pick = { type: 'pad', side, lane };
+    ring.userData.pick = { type: 'pad', side, lane };
+    scene.add(g);
+    pads[side].push(g);
+  }
+}
+
+/* ============================================================ 角色造型 */
+function stdMat(color, opt = {}) {
+  return new THREE.MeshStandardMaterial(Object.assign({
+    color, roughness: 0.35, metalness: 0.25,
+    emissive: color, emissiveIntensity: 0.12,
+  }, opt));
+}
+function crystalMat(color) {
+  return new THREE.MeshStandardMaterial({
+    color, roughness: 0.15, metalness: 0.1,
+    emissive: color, emissiveIntensity: 0.55,
+    transparent: true, opacity: 0.92,
+  });
+}
+function addGlowSprite(g, color, y, s) {
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: TEX_GLOW, color, transparent: true, opacity: 0.5,
+    depthWrite: false, blending: THREE.AdditiveBlending,
+  }));
+  sp.position.y = y; sp.scale.setScalar(s);
+  sp.raycast = () => {}; // 光晕不参与点击拾取
+  g.add(sp);
+  return sp;
+}
+
+function buildHeroMesh(def) {
+  const g = new THREE.Group();
+  const c = def.color;
+  const dark = 0x232848;
+
+  // 脚下光盘（选中/悬停高亮用）
+  const under = new THREE.Mesh(new THREE.CircleGeometry(0.72, 40),
+    new THREE.MeshBasicMaterial({
+      color: c, transparent: true, opacity: 0.22,
+      depthWrite: false, blending: THREE.AdditiveBlending,
+    }));
+  under.rotation.x = -Math.PI / 2;
+  under.position.y = 0.02;
+  g.add(under);
+  g.userData.under = under;
+
+  const body = new THREE.Group();
+  body.scale.setScalar(1.32);
+  g.add(body);
+  g.userData.body = body;
+
+  if (def.id === 'Licott') {
+    // 生命射手：细长晶枪 + 弓弧
+    const spire = new THREE.Mesh(new THREE.OctahedronGeometry(0.52), crystalMat(c));
+    spire.scale.set(0.62, 1.75, 0.62); spire.position.y = 1.0;
+    body.add(spire);
+    for (const s of [-1, 1]) { // 背后浮游晶刃
+      const blade = new THREE.Mesh(new THREE.OctahedronGeometry(0.16), crystalMat(0xff8b98));
+      blade.scale.set(0.45, 1.7, 0.45);
+      blade.position.set(s * 0.52, 1.25, -0.28);
+      blade.rotation.z = s * 0.5;
+      body.add(blade);
+    }
+    const gem = new THREE.Mesh(new THREE.OctahedronGeometry(0.16), crystalMat(0xffe1e5));
+    gem.position.y = 2.05;
+    body.add(gem);
+    addGlowSprite(body, c, 1.15, 1.7);
+  } else if (def.id === 'Faros') {
+    // 魔法师：束腰长袍 + 悬浮法球 + 环
+    const robe = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.55, 1.5, 24), stdMat(0x27306b, { emissiveIntensity: 0.18 }));
+    robe.position.y = 0.75;
+    body.add(robe);
+    const orb = new THREE.Mesh(new THREE.SphereGeometry(0.3, 24, 18), crystalMat(c));
+    orb.position.y = 1.95;
+    body.add(orb);
+    g.userData.spinPart = orb;
+    const ring1 = new THREE.Mesh(new THREE.TorusGeometry(0.48, 0.03, 8, 44), stdMat(0x9db8ff, { emissiveIntensity: 0.6 }));
+    ring1.position.y = 1.95; ring1.rotation.x = 1.1;
+    body.add(ring1);
+    g.userData.ringPart = ring1;
+    addGlowSprite(body, c, 1.95, 1.6);
+  } else if (def.id === 'Milanky') {
+    // 心灵花灵：花瓣锥 + 冰晶球
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.2, 1.0, 12), stdMat(0x1f5c40, { emissiveIntensity: 0.2 }));
+    stem.position.y = 0.5;
+    body.add(stem);
+    for (let i = 0; i < 6; i++) {
+      const a = i / 6 * Math.PI * 2;
+      const petal = new THREE.Mesh(new THREE.ConeGeometry(0.17, 0.7, 8), stdMat(0x63f0a2, { emissiveIntensity: 0.35 }));
+      petal.position.set(Math.cos(a) * 0.34, 1.15, Math.sin(a) * 0.34);
+      petal.rotation.set(Math.sin(a) * 0.85, 0, -Math.cos(a) * 0.85);
+      body.add(petal);
+    }
+    const bloom = new THREE.Mesh(new THREE.IcosahedronGeometry(0.3, 0), crystalMat(c));
+    bloom.position.y = 1.42;
+    body.add(bloom);
+    g.userData.spinPart = bloom;
+    addGlowSprite(body, c, 1.35, 1.5);
+  } else if (def.id === 'Vagro') {
+    // 机械卫士：叠层装甲块 + 天线
+    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.8, 0.6), stdMat(0x4a4318, { emissiveIntensity: 0.15 }));
+    torso.position.y = 0.85;
+    body.add(torso);
+    const chest = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.3, 0.64), crystalMat(c));
+    chest.position.y = 0.95;
+    body.add(chest);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.4, 0.42), stdMat(0x6a611f, { emissiveIntensity: 0.2 }));
+    head.position.y = 1.55;
+    body.add(head);
+    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.08, 0.02), crystalMat(0xffe89a));
+    eye.position.set(0, 1.58, 0.22);
+    body.add(eye);
+    for (const s of [-1, 1]) {
+      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.66, 0.34), stdMat(0x3c3712, { emissiveIntensity: 0.12 }));
+      arm.position.set(s * 0.62, 0.85, 0);
+      body.add(arm);
+    }
+    const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.5, 6), stdMat(0xf6c445, { emissiveIntensity: 0.7 }));
+    ant.position.set(0.16, 1.95, 0);
+    body.add(ant);
+    addGlowSprite(body, c, 1.0, 1.4);
+  } else if (def.id === 'Orwen') {
+    // 荆棘守卫：粗壮树干 + 环生尖刺 + 顶部晶芽
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.44, 1.35, 10), stdMat(0x3d4a1e, { emissiveIntensity: 0.12 }));
+    trunk.position.y = 0.68;
+    body.add(trunk);
+    for (let i = 0; i < 7; i++) {
+      const a = i / 7 * Math.PI * 2;
+      const yy = 0.45 + (i % 3) * 0.35;
+      const thorn = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.42, 6), stdMat(0x86a832, { emissiveIntensity: 0.3 }));
+      thorn.position.set(Math.cos(a) * 0.42, yy, Math.sin(a) * 0.42);
+      thorn.rotation.set(Math.sin(a) * 1.3, 0, -Math.cos(a) * 1.3);
+      body.add(thorn);
+    }
+    const bud = new THREE.Mesh(new THREE.OctahedronGeometry(0.32), crystalMat(c));
+    bud.scale.set(0.8, 1.25, 0.8); bud.position.y = 1.7;
+    body.add(bud);
+    g.userData.spinPart = bud;
+    for (const s of [-1, 1]) { // 肩甲树皮板
+      const plate = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.55, 0.5), stdMat(0x55632b, { emissiveIntensity: 0.15 }));
+      plate.position.set(s * 0.52, 1.15, 0);
+      plate.rotation.z = s * -0.25;
+      body.add(plate);
+    }
+    addGlowSprite(body, c, 1.6, 1.5);
+  } else if (def.id === 'Vermeil') {
+    // 星轨咒师：纤细法袍 + 环绕星辰
+    const robe = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.48, 1.55, 20), stdMat(0x2f2359, { emissiveIntensity: 0.18 }));
+    robe.position.y = 0.78;
+    body.add(robe);
+    const head = new THREE.Mesh(new THREE.OctahedronGeometry(0.2), crystalMat(0xe6d9ff));
+    head.position.y = 1.78;
+    body.add(head);
+    const orbit = new THREE.Group();
+    orbit.position.y = 1.3;
+    for (let i = 0; i < 3; i++) {
+      const a = i / 3 * Math.PI * 2;
+      const star = new THREE.Mesh(new THREE.OctahedronGeometry(0.1), crystalMat(c));
+      star.position.set(Math.cos(a) * 0.62, Math.sin(a * 2) * 0.12, Math.sin(a) * 0.62);
+      orbit.add(star);
+    }
+    body.add(orbit);
+    g.userData.spinPart = orbit;
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.62, 0.02, 8, 44), stdMat(0xc9b6ff, { emissiveIntensity: 0.55 }));
+    ring.position.y = 1.3; ring.rotation.x = Math.PI / 2 - 0.25;
+    body.add(ring);
+    g.userData.ringPart = ring;
+    addGlowSprite(body, c, 1.4, 1.7);
+  } else if (def.id === 'Kulom') {
+    // 攻城重炮：履带底盘 + 仰角炮管
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.42, 0.72), stdMat(0x5a3a1a, { emissiveIntensity: 0.12 }));
+    chassis.position.y = 0.42;
+    body.add(chassis);
+    for (const s of [-1, 1]) {
+      const tread = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.3, 0.85), stdMat(0x2c2c34, { emissiveIntensity: 0.06 }));
+      tread.position.set(s * 0.55, 0.22, 0);
+      body.add(tread);
+    }
+    const turret = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.34, 0.5), stdMat(0x7a4d1e, { emissiveIntensity: 0.15 }));
+    turret.position.y = 0.8;
+    body.add(turret);
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.12, 1.25, 12), stdMat(0x8a5a24, { emissiveIntensity: 0.2 }));
+    barrel.position.set(0, 1.25, -0.42);
+    barrel.rotation.x = Math.PI / 2 - 0.75; // 仰角朝前
+    body.add(barrel);
+    const muzzle = new THREE.Mesh(new THREE.TorusGeometry(0.11, 0.035, 8, 20), crystalMat(c));
+    muzzle.position.set(0, 1.67, -0.87);
+    muzzle.rotation.x = Math.PI / 2 - 0.75;
+    body.add(muzzle);
+    const core = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.2, 0.52), crystalMat(c));
+    core.position.y = 0.62;
+    body.add(core);
+    addGlowSprite(body, c, 0.9, 1.4);
+  } else if (def.id === 'Tio') {
+    // 茶之精灵：叶裙小灵 + 头顶嫩芽
+    const skirt = new THREE.Mesh(new THREE.ConeGeometry(0.5, 0.85, 9), stdMat(0x1f6e58, { emissiveIntensity: 0.2 }));
+    skirt.position.y = 0.45;
+    body.add(skirt);
+    const bodyBall = new THREE.Mesh(new THREE.SphereGeometry(0.3, 20, 14), crystalMat(c));
+    bodyBall.position.y = 1.02;
+    body.add(bodyBall);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 18, 12), crystalMat(0xd8fff2));
+    head.position.y = 1.5;
+    body.add(head);
+    for (const s of [-1, 1]) { // 头顶双叶
+      const leaf = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.4, 7), stdMat(0x35c99a, { emissiveIntensity: 0.4 }));
+      leaf.position.set(s * 0.13, 1.82, 0);
+      leaf.rotation.z = s * 0.55;
+      body.add(leaf);
+    }
+    addGlowSprite(body, c, 1.2, 1.4);
+  } else if (def.id === 'Nocti') {
+    // 暗影蛾：暗色蛾身 + 晶翼 + 触角
+    const moth = new THREE.Mesh(new THREE.OctahedronGeometry(0.3), stdMat(0x241b38, { emissiveIntensity: 0.25 }));
+    moth.scale.set(0.7, 1.9, 0.7); moth.position.y = 1.05;
+    body.add(moth);
+    for (const s of [-1, 1]) {
+      const wing = new THREE.Mesh(new THREE.OctahedronGeometry(0.34), crystalMat(c));
+      wing.scale.set(1.35, 0.75, 0.12);
+      wing.position.set(s * 0.5, 1.3, -0.15);
+      wing.rotation.z = s * 0.55;
+      wing.rotation.y = s * 0.3;
+      body.add(wing);
+      const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.4, 5), stdMat(0xe9a6ff, { emissiveIntensity: 0.6 }));
+      ant.position.set(s * 0.1, 1.85, -0.05);
+      ant.rotation.z = s * 0.45;
+      body.add(ant);
+    }
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.07, 10, 8), crystalMat(0xffd6ff));
+    eye.position.set(0, 1.6, 0.18);
+    body.add(eye);
+    addGlowSprite(body, c, 1.3, 1.6);
+  } else if (def.id === 'Shirley') {
+    // 冰灵：雪滴之躯 + 冰晶冠
+    const drop = new THREE.Mesh(new THREE.SphereGeometry(0.42, 24, 18), crystalMat(c));
+    drop.scale.set(0.9, 1.35, 0.9); drop.position.y = 0.9;
+    body.add(drop);
+    const headDrop = new THREE.Mesh(new THREE.SphereGeometry(0.24, 20, 14), crystalMat(0xd8efff));
+    headDrop.position.y = 1.72;
+    body.add(headDrop);
+    for (let i = 0; i < 5; i++) {
+      const a = i / 5 * Math.PI * 2;
+      const spike = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.3, 6), crystalMat(0xeaf6ff));
+      spike.position.set(Math.cos(a) * 0.2, 2.0, Math.sin(a) * 0.2);
+      spike.rotation.set(Math.sin(a) * 0.5, 0, -Math.cos(a) * 0.5);
+      body.add(spike);
+    }
+    addGlowSprite(body, 0xcfe9ff, 1.2, 1.6);
+  }
+  return g;
+}
+
+function buildBaseMesh(side) {
+  const g = new THREE.Group();
+  g.scale.setScalar(0.88);
+  const c = SIDE_HEX[side];
+  const plinth = new THREE.Mesh(new THREE.CylinderGeometry(1.35, 1.6, 0.5, 8), stdMat(0x1a1f42, { emissiveIntensity: 0.08 }));
+  plinth.position.y = 0.25;
+  g.add(plinth);
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.72, 1.0, 1.7, 8), stdMat(0x222a58, { emissiveIntensity: 0.1 }));
+  shaft.position.y = 1.35;
+  g.add(shaft);
+  const crown = new THREE.Mesh(new THREE.OctahedronGeometry(0.85), crystalMat(c));
+  crown.scale.set(0.7, 1.25, 0.7);
+  crown.position.y = 3.1;
+  g.add(crown);
+  g.userData.spinPart = crown;
+  const halo = new THREE.Mesh(new THREE.TorusGeometry(0.78, 0.025, 8, 48), stdMat(c, { emissiveIntensity: 0.6 }));
+  halo.position.y = 2.95; halo.rotation.x = Math.PI / 2;
+  g.add(halo);
+  g.userData.ringPart = halo;
+  addGlowSprite(g, c, 3.1, 3.2);
+  const under = new THREE.Mesh(new THREE.CircleGeometry(1.7, 48),
+    new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: 0.14, depthWrite: false, blending: THREE.AdditiveBlending }));
+  under.rotation.x = -Math.PI / 2; under.position.y = 0.02;
+  g.add(under);
+  g.userData.under = under;
+  g.userData.body = g;
+  return g;
+}
+
+/* ============================================================ 标签（DOM 投影） */
+const labelLayer = $('#labels');
+const visuals = new Map(); // hero.uid -> {group, label, offY, lift}
+
+function makeLabel(h) {
+  const el = document.createElement('div');
+  el.className = 'hlabel' + (h.isBase ? ' base' : '') + (h.side === 1 ? ' foe' : '');
+  labelLayer.appendChild(el);
+  return el;
+}
+
+function attachVisual(h, { hidden = false } = {}) {
+  const group = h.isBase ? buildBaseMesh(h.side) : buildHeroMesh(h.def);
+  const pos = heroWorldPos(h);
+  group.position.copy(pos);
+  if (hidden) group.position.y = pos.y - 4.2;
+  if (h.side === 1 && !h.isBase) group.rotation.y = Math.PI;
+  group.traverse(o => { o.userData.pickHero = h; });
+  scene.add(group);
+  const label = makeLabel(h);
+  if (hidden) label.style.opacity = '0';
+  const v = { group, label, offY: h.isBase ? (h.side === 0 ? 2.2 : 3.5) : 3.1, lift: 0, phase: Math.random() * Math.PI * 2 };
+  visuals.set(h.uid, v);
+  return v;
+}
+
+function removeVisual(h) {
+  const v = visuals.get(h.uid);
+  if (!v) return;
+  scene.remove(v.group);
+  v.label.remove();
+  visuals.delete(h.uid);
+}
+
+const maxHpOf = h => h.isBase ? 150 : h.def.hp;
+
+function labelHtml(h) {
+  const ratio = clamp01(h.hpShow / maxHpOf(h));
+  const hue = ratio > 0.5 ? '#5be08a' : ratio > 0.25 ? '#f6c445' : '#ff5265';
+  if (h.isBase) {
+    return `<div class="ln"><span>${h.name}</span></div>
+      <div class="bar"><i style="width:${ratio * 100}%;background:${hue}"></i></div>
+      <div class="nums">${Math.max(0, h.hpShow)} / ${maxHpOf(h)}</div>`;
+  }
+  // 攻防偏离基础值时变色（增益绿 / 减益红）
+  const statCol = (cur, base) => cur > base ? '#5be08a' : cur < base ? '#ff5265' : '';
+  const gc = statCol(h.gp, h.def.gp), fc = statCol(h.fp, h.def.fp);
+  return `<div class="ln"><span style="color:${KEI[h.kei].color}">${h.name}</span><em>Lv${h.maxexp}</em></div>
+    <div class="bar"><i style="width:${ratio * 100}%;background:${hue}"></i></div>
+    <div class="nums">HP ${Math.max(0, h.hpShow)}<b>MP ${h.mp}</b></div>
+    <div class="nums ad"><span${gc ? ` style="color:${gc}"` : ''}>攻 ${h.gp}</span><span${fc ? ` style="color:${fc}"` : ''}>防 ${h.fp}</span></div>`;
+}
+
+function updateLabels() {
+  const w = innerWidth, hgt = innerHeight;
+  const p = new THREE.Vector3();
+  for (const [uid, v] of visuals) {
+    const h = v.heroRef;
+    if (!h) continue;
+    p.copy(v.group.position); p.y += v.offY;
+    p.project(camera);
+    if (p.z > 1) { v.label.style.display = 'none'; continue; }
+    v.label.style.display = '';
+    v.label.style.transform =
+      `translate(-50%,-100%) translate(${(p.x * 0.5 + 0.5) * w}px, ${(-p.y * 0.5 + 0.5) * hgt}px)`;
+    const html = labelHtml(h);
+    if (v.lastHtml !== html) { v.label.innerHTML = html; v.lastHtml = html; }
+  }
+}
+
+function screenPosOf(h, offY = 1.4) {
+  const v = visuals.get(h.uid);
+  const p = new THREE.Vector3();
+  if (v) { p.copy(v.group.position); p.y += offY; }
+  p.project(camera);
+  return [(p.x * 0.5 + 0.5) * innerWidth, (-p.y * 0.5 + 0.5) * innerHeight];
+}
+
+/* ============================================================ 表现事件播放 */
+let playing = false;
+
+// 受击闪白 + 弹缩
+function hitFlash(h) {
+  const v = visuals.get(h.uid);
+  if (!v || instant()) return;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: TEX_GLOW, color: 0xffffff, transparent: true, opacity: 0.95,
+    depthWrite: false, blending: THREE.AdditiveBlending,
+  }));
+  sp.position.copy(v.group.position);
+  sp.position.y += h.isBase ? 2.4 : 1.4;
+  const s0 = h.isBase ? 3.4 : 2.2;
+  sp.scale.setScalar(s0);
+  scene.add(sp);
+  const t0 = performance.now();
+  (function step(nw) {
+    const t = clamp01((nw - t0) / 140);
+    sp.material.opacity = 0.95 * (1 - t);
+    sp.scale.setScalar(s0 * (1 + t * 0.55));
+    if (t < 1 && !instant()) nextFrame(step); else scene.remove(sp);
+  })(t0);
+  if (!h.isBase && !h.dead) v.punch = 1; // tick 中衰减的弹缩
+}
+
+function popupDamage(ev) {
+  const [x, y] = screenPosOf(ev.h, ev.h.isBase ? 3.2 : 1.7);
+  const el = document.createElement('div');
+  const heal = ev.val < 0;
+  el.className = 'dmg' + (heal ? ' heal' : '');
+  el.textContent = (heal ? '+' + (-ev.val) : '-' + ev.val);
+  el.style.left = x + 'px'; el.style.top = y + 'px';
+  labelLayer.appendChild(el);
+  ev.h.hpShow -= ev.val;
+  setTimeout(() => el.remove(), 950);
+  if (heal) { sfx.heal(); return; }
+  hitFlash(ev.h);
+  if (ev.h.isBase) { sfx.hitBase(); shake(0.22, 260); }
+  else sfx.hit();
+}
+
+function popupShow(ev) {
+  const [x, y] = screenPosOf(ev.h, ev.h.isBase ? 3.6 : 2.1);
+  const el = document.createElement('div');
+  el.className = 'shout';
+  el.textContent = ev.text;
+  el.style.left = x + 'px'; el.style.top = y + 'px';
+  el.style.color = ev.color;
+  el.style.animationDuration = ev.ms + 'ms';
+  labelLayer.appendChild(el);
+  setTimeout(() => el.remove(), ev.ms);
+}
+
+async function animBullet(ev) {
+  if (instant()) return;
+  const vf = visuals.get(ev.from.uid), vt = visuals.get(ev.to.uid);
+  if (!vf || !vt) return;
+  sfx.shoot();
+  const from = vf.group.position.clone().add(new THREE.Vector3(0, ev.from.isBase ? 2.6 : 1.2, 0));
+  const to = vt.group.position.clone().add(new THREE.Vector3(0, ev.to.isBase ? 2.2 : 1.1, 0));
+  const g = new THREE.Group();
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.13, 14, 10),
+    new THREE.MeshBasicMaterial({ color: 0xffffff }));
+  g.add(core);
+  const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: TEX_GLOW, color: ev.color, transparent: true, opacity: 0.95,
+    depthWrite: false, blending: THREE.AdditiveBlending,
+  }));
+  glow.scale.setScalar(1.3);
+  g.add(glow);
+  scene.add(g);
+  const D = 520, t0 = performance.now();
+  const mid = from.clone().lerp(to, 0.5); mid.y += 1.1;
+  await new Promise(res => {
+    (function step(now) {
+      if (instant()) { res(); return; }
+      const t = clamp01((now - t0) / D);
+      const e = easeIn(t);
+      // 二次贝塞尔弧线
+      const a = from.clone().lerp(mid, e), b = mid.clone().lerp(to, e);
+      g.position.copy(a.lerp(b, e));
+      if (t < 1) nextFrame(step); else res();
+    })(t0);
+  });
+  // 命中闪光
+  glow.material.opacity = 1; glow.scale.setScalar(2.6); core.visible = false;
+  await sleep(70);
+  scene.remove(g);
+}
+
+async function animDie(ev) {
+  const v = visuals.get(ev.h.uid);
+  if (v) {
+    if (instant()) removeVisual(ev.h);
+    else {
+      const g = v.group, y0 = g.position.y;
+      v.label.style.opacity = '0';
+      const D = ev.h.isBase ? 1100 : 720, t0 = performance.now();
+      await new Promise(res => {
+        (function step(now) {
+          if (instant()) { res(); return; }
+          const t = clamp01((now - t0) / D);
+          g.position.y = y0 - easeIn(t) * 2.6;
+          g.scale.setScalar(1 - easeIn(t) * 0.85);
+          g.rotation.y += 0.06;
+          if (t < 1) nextFrame(step); else res();
+        })(t0);
+      });
+      removeVisual(ev.h);
+    }
+  }
+  const wasLane = { side: ev.h.side, lane: ev.h.lane };
+  heroDieCleanup(ev.h);
+  if (!ev.h.isBase) {
+    // 后排补位
+    const list = (wasLane.side === 0 ? game.you : game.ene).lanes[wasLane.lane];
+    for (const x of list) {
+      const vv = visuals.get(x.uid);
+      if (vv) vv.group.position.copy(heroWorldPos(x));
+    }
+  }
+  if (ui.selected === ev.h) { ui.selected = null; renderPanel(); }
+  if (ui.pending && ui.pending.sub === ev.h) cancelPending();
+}
+
+async function animSummon(ev) {
+  const h = ev.h;
+  const v = attachVisual(h, { hidden: true });
+  v.heroRef = h;
+  const target = heroWorldPos(h);
+  if (instant()) {
+    v.group.position.copy(target);
+    v.label.style.opacity = '';
+    return;
+  }
+  sfx.summon();
+  // 法阵展开 + 光柱
+  const c = h.side === 0 ? (h.def ? h.def.color : SIDE_HEX[0]) : SIDE_HEX[1];
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(1.0, 0.05, 10, 60),
+    new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending }));
+  ring.rotation.x = Math.PI / 2;
+  ring.position.set(target.x, TOP_Y + 0.05, target.z);
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.7, 5.4, 24, 1, true),
+    new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: 0.35, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }));
+  beam.position.set(target.x, TOP_Y + 2.7, target.z);
+  scene.add(ring); scene.add(beam);
+  const D = 760, t0 = performance.now();
+  await new Promise(res => {
+    (function step(now) {
+      if (instant()) { res(); return; }
+      const t = clamp01((now - t0) / D);
+      const e = easeOut(t);
+      ring.scale.setScalar(0.2 + e * 1.4);
+      ring.material.opacity = 0.9 * (1 - t * 0.85);
+      beam.material.opacity = 0.4 * (1 - t);
+      beam.rotation.y += 0.08;
+      v.group.position.y = target.y - 4.2 + e * 4.2;
+      v.label.style.opacity = String(t);
+      if (t < 1) nextFrame(step); else res();
+    })(t0);
+  });
+  v.group.position.copy(target);
+  v.label.style.opacity = '';
+  scene.remove(ring); scene.remove(beam);
+  if (h.def && h.def.lines) { // 登场台词
+    popupShow({ h, text: '「' + h.def.lines.summon + '」', color: '#dfe4ff', ms: 1800 });
+  }
+}
+
+function killVignette() {
+  const el = $('#killflash');
+  el.classList.remove('on');
+  void el.offsetWidth;
+  el.classList.add('on');
+}
+
+async function playQueue() {
+  if (playing) return;
+  playing = true;
+  document.body.classList.add('busy');
+  while (fxQueue.length) {
+    const ev = fxQueue.shift();
+    if (ev.t === 'bullet') await animBullet(ev);
+    else if (ev.t === 'hpdec') popupDamage(ev);
+    else if (ev.t === 'show') { popupShow(ev); if (!instant()) await sleep(160); }
+    else if (ev.t === 'die') {
+      if (!instant()) { // 击杀顿帧 + 白闪
+        killVignette();
+        sfx[ev.h.isBase ? 'baseDown' : 'die']();
+        if (ev.h.isBase) shake(0.4, 600);
+        await sleep(ev.h.isBase ? 160 : 90);
+      }
+      await animDie(ev);
+    }
+    else if (ev.t === 'summon') await animSummon(ev);
+  }
+  // 校正显示血量
+  for (const s of [game.you, game.ene]) {
+    for (const h of allHeroes(s)) h.hpShow = h.hp;
+    s.base.hpShow = s.base.hp;
+  }
+  playing = false;
+  document.body.classList.remove('busy');
+  refreshTopbar(); refreshJadebar(); renderPanel();
+  ensureHeroRefs(); updateLabels();
+  if (game.over) showOverlay();
+}
+
+/* ============================================================ UI 状态 */
+const ui = {
+  selected: null,      // 展示面板中的角色
+  pending: null,       // {cmd:'A'|'S1'|'S2'|'S3', sub}
+  summoningJade: null, // 选中的召唤玉
+  hover: null,
+};
+
+function msg(s) { $('#banner').textContent = s; }
+function warn(s) {
+  const b = $('#banner');
+  b.textContent = s;
+  b.classList.remove('warn');
+  void b.offsetWidth;
+  b.classList.add('warn');
+  sfx.error();
+}
+
+function cancelPending() {
+  ui.pending = null;
+  msg('');
+  renderPanel();
+}
+function cancelSummon() {
+  if (ui.summoningJade) { ui.summoningJade = null; msg(''); refreshJadebar(); }
+}
+
+/* ---------- 顶栏 ---------- */
+function refreshTopbar() {
+  $('#turnNum').textContent = game.turn;
+  $('#ptsYou').textContent = game.you.pts;
+  $('#ptsEne').textContent = game.ene.pts;
+}
+
+/* ---------- 召唤玉栏 ---------- */
+const SVG_CRYSTAL = `<svg viewBox="0 0 24 24" fill="none"><path d="M12 2 L19 9 L12 22 L5 9 Z" fill="currentColor" opacity="0.28"/><path d="M12 2 L19 9 L12 22 L5 9 Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M5 9 H19 M12 2 L9 9 L12 22 M12 2 L15 9 L12 22" stroke="currentColor" stroke-width="0.9" opacity="0.7"/></svg>`;
+
+function refreshJadebar() {
+  const bar = $('#jades');
+  bar.innerHTML = '';
+  for (const j of game.you.jades) {
+    const el = document.createElement('button');
+    el.className = 'jade';
+    const col = KEI[j.def.kei].color;
+    let stateHtml, stateCls;
+    if (j.cool > 0) { stateHtml = `冷却 ${j.cool}`; stateCls = 'cd'; }
+    else if (j.cool === -1) { stateHtml = '出战中'; stateCls = 'out'; }
+    else { stateHtml = '就绪'; stateCls = 'ready'; }
+    if (ui.summoningJade === j) el.classList.add('sel');
+    if (j.cool !== 0 || game.you.pts < j.cost) el.classList.add('dim');
+    el.style.setProperty('--jc', col);
+    el.innerHTML = `
+      <span class="ic">${SVG_CRYSTAL}</span>
+      <span class="nm">${j.def.name}</span>
+      <span class="cost">${j.cost} 点</span>
+      <span class="st ${stateCls}">${stateHtml}</span>
+      <span class="exp">EXP ${j.exp}/${j.maxexp}</span>`;
+    el.onclick = () => clickJade(j, el);
+    bar.appendChild(el);
+  }
+}
+
+function clickJade(j, el) {
+  if (playing || game.over) return;
+  cancelPending();
+  if (ui.summoningJade === j) { cancelSummon(); return; }
+  if (j.cool === -1) { warn(j.def.name + ' 已在场上'); return; }
+  if (j.cool > 0) { warn('召唤玉冷却中：还需 ' + j.cool + ' 回合'); return; }
+  if (game.you.pts < j.cost) {
+    warn('召唤点不足（需要 ' + j.cost + ' 点）');
+    el.classList.add('shake');
+    setTimeout(() => el.classList.remove('shake'), 400);
+    return;
+  }
+  ui.summoningJade = j;
+  msg('为「' + j.def.name + '」选择一条我方战线');
+  sfx.jade();
+  refreshJadebar();
+}
+
+/* ---------- 信息面板 ---------- */
+const ICONS = {
+  hp: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 21C7 16.6 3 13.2 3 9.3 3 6.4 5.2 4.5 7.8 4.5c1.6 0 3.2.8 4.2 2.2 1-1.4 2.6-2.2 4.2-2.2 2.6 0 4.8 1.9 4.8 4.8 0 3.9-4 7.3-9 11.7Z"/></svg>`,
+  atk: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20 14.5 9.5M14.5 9.5 19 5l.5-1.5L18 4l-4.5 4.5M14.5 9.5l-2 2M6.5 17.5 4 20l-1 1M8 14l2 2"/></svg>`,
+  def: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4.6 3 8.4 7 10 4-1.6 7-5.4 7-10V6Z"/></svg>`,
+  mp: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.7c3.2 4.3 6.3 8 6.3 11.6A6.3 6.3 0 0 1 12 20.6a6.3 6.3 0 0 1-6.3-6.3C5.7 10.7 8.8 7 12 2.7Z"/></svg>`,
+  exp: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 2 2.7 6.2L21.5 9l-5 4.6 1.4 6.9L12 17l-5.9 3.5L7.5 13.6 2.5 9l6.8-.8Z"/></svg>`,
+};
+
+function statCell(icon, name, val) {
+  return `<div class="stat"><span class="si">${ICONS[icon]}</span><span class="sn">${name}</span><b>${val}</b></div>`;
+}
+
+function renderPanel() {
+  const p = $('#panel');
+  const h = ui.selected;
+  if (!h || h.dead) { p.classList.add('hidden'); return; }
+  p.classList.remove('hidden');
+  const mine = h.side === 0 && !h.isBase;
+  const keiChip = h.kei ? `<span class="chip" style="--kc:${KEI[h.kei].color}">${KEI[h.kei].name}</span>` : '';
+  let html = `<div class="p-head"><span class="p-name">${h.name}</span>${keiChip}</div>`;
+  if (h.isBase) {
+    html += `<div class="p-stats">${statCell('hp', '生命', Math.max(0, h.hp) + ' / ' + maxHpOf(h))}</div>
+      <div class="p-tip">摧毁${h.side === 0 ? '它你就输了' : '它即可获胜'}。</div>`;
+  } else {
+    html += `<div class="p-stats">
+      ${statCell('hp', '生命', h.hp)}${statCell('atk', '攻击', h.gp)}
+      ${statCell('def', '防御', h.fp)}${statCell('mp', '魔力', h.mp)}
+      ${statCell('exp', '经验', h.exp + ' / ' + h.maxexp)}
+      <div class="stat"><span class="sn">等级</span><b>Lv ${h.maxexp}</b></div>
+      ${h.defId === 'Vermeil' ? `<div class="stat"><span class="sn">星轨</span><b>×${h.stacks}</b></div>` : ''}
+    </div>`;
+    if (mine) {
+      const aDis = h.usableA <= 0 || playing;
+      html += `<button class="act atkbtn ${aDis ? 'dis' : ''}" data-cmd="A">
+        <span class="si">${ICONS.atk}</span>普通攻击<em>${h.usableA > 0 ? '' : '已使用'}</em></button>`;
+    }
+    html += `<div class="p-skills">`;
+    h.def.skills.forEach((sk, i) => {
+      const cost = h.costs[i];
+      const usable = h.usable[i] > 0;
+      const afford = h.mp >= cost;
+      if (mine) {
+        const dis = !usable || playing;
+        html += `<button class="act skill ${dis ? 'dis' : ''} ${(!afford && usable) ? 'poor' : ''}" data-cmd="S${i + 1}">
+          <span class="sk-head"><span class="sk-nm">${sk.name}</span><span class="sk-cost">${cost} MP</span></span>
+          <span class="sk-desc">${sk.desc}</span>
+          ${usable ? '' : '<span class="sk-used">本回合已使用</span>'}</button>`;
+      } else {
+        html += `<div class="act skill ro">
+          <span class="sk-head"><span class="sk-nm">${sk.name}</span><span class="sk-cost">${cost} MP</span></span>
+          <span class="sk-desc">${sk.desc}</span></div>`;
+      }
+    });
+    html += `</div>`;
+  }
+  p.innerHTML = html;
+  if (mine) {
+    p.querySelectorAll('[data-cmd]').forEach(btn => {
+      btn.onclick = () => clickCommand(h, btn.dataset.cmd);
+    });
+  }
+}
+
+function clickCommand(h, cmd) {
+  if (playing || game.over || h.dead || h.side !== 0) return;
+  cancelSummon();
+  if (ui.pending && ui.pending.sub === h && ui.pending.cmd === cmd) { cancelPending(); return; }
+  if (cmd === 'A') {
+    if (h.usableA <= 0) return;
+    ui.pending = { cmd, sub: h };
+    msg('请选择攻击目标');
+    return;
+  }
+  const i = { S1: 0, S2: 1, S3: 2 }[cmd];
+  if (h.usable[i] <= 0) return;
+  if (h.mp < h.costs[i]) { warn('魔力值不够。'); return; }
+  const sk = h.def.skills[i];
+  if (sk.instant) { // 无目标技能：立即释放
+    sfx.skill(h.kei);
+    castSkill(h.defId, cmd, h, null);
+    ui.pending = null;
+    playQueue();
+    return;
+  }
+  ui.pending = { cmd, sub: h };
+  sfx.select();
+  msg('[' + sk.name + '] 请选择目标');
+}
+
+function clickTarget(ob) {
+  const { cmd, sub } = ui.pending;
+  const bad = validateTarget(sub, cmd, ob);
+  if (bad) { warn(bad); return; }
+  ui.pending = null;
+  msg('');
+  if (cmd === 'A') {
+    const ok = attack(sub, ob);
+    if (!ok) warn('未能击穿目标的防御');
+  } else {
+    sfx.skill(sub.kei);
+    castSkill(sub.defId, cmd, sub, ob);
+  }
+  playQueue();
+}
+
+/* ---------- 结束回合 / 结算 ---------- */
+$('#endTurn').onclick = () => {
+  if (playing || game.over) return;
+  cancelPending(); cancelSummon();
+  ui.selected = null; renderPanel();
+  sfx.turn();
+  runEnemyTurnAndPrepare();
+  refreshTopbar();
+  playQueue();
+};
+
+function showOverlay() {
+  const o = $('#overlay');
+  o.classList.remove('hidden');
+  const win = game.overWinner === 0;
+  sfx[win ? 'win' : 'lose']();
+  $('#ovTitle').textContent = win ? '胜利' : '战败';
+  $('#ovTitle').className = win ? 'win' : 'lose';
+  $('#ovSub').textContent = win
+    ? '敌方基地已化为星尘。'
+    : '我方基地陷落了……再试一次吧。';
+}
+$('#replay').onclick = () => location.reload();
+
+/* ============================================================ 拾取与交互 */
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+
+function pickAt(ev) {
+  pointer.x = (ev.clientX / innerWidth) * 2 - 1;
+  pointer.y = -(ev.clientY / innerHeight) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(scene.children, true);
+  for (const hit of hits) {
+    if (hit.object.userData.pickHero) return { type: 'hero', hero: hit.object.userData.pickHero };
+    if (hit.object.userData.pick && hit.object.userData.pick.type === 'pad') return hit.object.userData.pick;
+  }
+  return null;
+}
+
+canvas.addEventListener('pointermove', ev => {
+  const hit = pickAt(ev);
+  let hover = null;
+  if (hit && hit.type === 'hero' && !hit.hero.dead) hover = hit.hero;
+  ui.hover = hover;
+  const padHover = hit && hit.type === 'pad' && hit.side === 0 && !!ui.summoningJade;
+  canvas.style.cursor = (hover || padHover) ? 'pointer' : '';
+});
+
+canvas.addEventListener('pointerdown', ev => {
+  if (ev.button !== 0 || playing || game.over) return;
+  const hit = pickAt(ev);
+  if (!hit) {
+    if (ui.pending) cancelPending();
+    else if (ui.summoningJade) cancelSummon();
+    else { ui.selected = null; renderPanel(); }
+    return;
+  }
+  if (hit.type === 'hero') {
+    const h = hit.hero;
+    if (h.dead) return;
+    if (ui.pending) { clickTarget(h); renderPanel(); return; }
+    ui.selected = h; // 召唤选择保持不变，点角色只查看信息
+    sfx.select();
+    renderPanel();
+    return;
+  }
+  if (hit.type === 'pad') {
+    if (hit.side !== 0) return;
+    clickOwnPad(hit.lane);
+  }
+});
+
+function clickOwnPad(lane) {
+  if (ui.summoningJade) {
+    if (game.you.lanes[lane].length >= LANE_CAP) { warn('该战线已有英雄驻守'); return; }
+    const j = ui.summoningJade;
+    ui.summoningJade = null;
+    playerSummon(j, lane);
+    msg('');
+    refreshTopbar(); refreshJadebar();
+    playQueue();
+  }
+}
+
+addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') {
+    if (!$('#codex').classList.contains('hidden')) { $('#codex').classList.add('hidden'); return; }
+    cancelPending(); cancelSummon();
+  }
+});
+
+/* ============================================================ 高亮圈（可选目标脉冲） */
+const targetRing = (() => {
+  const m = new THREE.Mesh(new THREE.TorusGeometry(0.85, 0.045, 10, 48),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending }));
+  m.rotation.x = Math.PI / 2;
+  m.visible = false;
+  scene.add(m);
+  return m;
+})();
+
+/* ============================================================ 初始化 */
+initGame();
+attachVisual(game.you.base).heroRef = game.you.base;
+attachVisual(game.ene.base).heroRef = game.ene.base;
+refreshTopbar();
+refreshJadebar();
+renderPanel();
+msg('点击下方召唤玉，召唤你的第一位英雄');
+
+// 补充 heroRef（attachVisual 内没有 hero 引用时用于标签渲染）
+function ensureHeroRefs() {
+  for (const s of [game.you, game.ene]) {
+    for (const h of allHeroes(s)) {
+      const v = visuals.get(h.uid);
+      if (v && !v.heroRef) v.heroRef = h;
+    }
+    const vb = visuals.get(s.base.uid);
+    if (vb && !vb.heroRef) vb.heroRef = s.base;
+  }
+}
+
+/* ============================================================ 主循环 */
+const clock = new THREE.Clock();
+let elapsed = 0;
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  elapsed += dt;
+
+  // 法阵旋转 + 呼吸
+  for (let side = 0; side < 2; side++) {
+    for (const g of pads[side]) {
+      g.userData.disc.rotation.z += g.userData.spin * dt;
+      const breathe = 0.5 + Math.sin(elapsed * 1.6 + g.userData.lane) * 0.1;
+      g.userData.disc.material.opacity = ui.summoningJade && side === 0 ? 0.85 : breathe;
+      g.userData.ring.material.opacity = ui.summoningJade && side === 0
+        ? 0.8 + Math.sin(elapsed * 6) * 0.2 : 0.55;
+    }
+  }
+
+  ensureHeroRefs();
+
+  // 相机震动
+  if (shakeLeft > 0) {
+    shakeLeft -= dt;
+    const k = shakeAmp * Math.max(0, shakeLeft) * 4;
+    camera.position.set(
+      camBasePos.x + (Math.random() - 0.5) * k,
+      camBasePos.y + (Math.random() - 0.5) * k,
+      camBasePos.z + (Math.random() - 0.5) * k * 0.4
+    );
+    if (shakeLeft <= 0) { shakeAmp = 0; camera.position.copy(camBasePos); }
+  }
+
+  // 角色悬浮动画 / 悬停抬升 / 选中光盘
+  for (const [uid, v] of visuals) {
+    const h = v.heroRef;
+    if (!h) continue;
+    const g = v.group;
+    if (g.userData.spinPart) g.userData.spinPart.rotation.y += dt * 1.4;
+    if (g.userData.ringPart) g.userData.ringPart.rotation.z += dt * 0.9;
+    if (v.punch > 0.01 && !h.dead) { // 受击弹缩
+      g.scale.setScalar(1 + v.punch * 0.13);
+      v.punch *= Math.pow(0.0001, dt);
+    } else if (v.punch) { v.punch = 0; if (!h.dead) g.scale.setScalar(1); }
+    if (!h.isBase && !playing) {
+      const targetLift = (ui.hover === h || ui.selected === h) ? 0.22 : 0;
+      v.lift += (targetLift - v.lift) * Math.min(1, dt * 10);
+      const bob = Math.sin(elapsed * 2 + v.phase) * 0.04;
+      const basePos = heroWorldPos(h);
+      g.position.y = basePos.y + v.lift + bob;
+    }
+    if (g.userData.under) {
+      const active = ui.selected === h || ui.hover === h;
+      g.userData.under.material.opacity = active ? 0.55 : (h.isBase ? 0.14 : 0.22);
+    }
+  }
+
+  // 目标指示环：悬停在合法目标上时套圈
+  if (ui.pending && ui.hover && !ui.hover.dead) {
+    const bad = validateTarget(ui.pending.sub, ui.pending.cmd, ui.hover);
+    const v = visuals.get(ui.hover.uid);
+    if (!bad && v) {
+      targetRing.visible = true;
+      targetRing.position.copy(v.group.position);
+      targetRing.position.y = TOP_Y + 0.1;
+      const s = (ui.hover.isBase ? 1.9 : 1) * (1 + Math.sin(elapsed * 7) * 0.08);
+      targetRing.scale.setScalar(s);
+      targetRing.material.color.setHex(0xff5265);
+    } else targetRing.visible = false;
+  } else targetRing.visible = false;
+
+  // 梦想卡漂浮
+  dreamCards.forEach((m, i) => {
+    m.position.y += Math.sin(elapsed * 0.6 + i * 2) * 0.002;
+    m.rotation.z = Math.sin(elapsed * 0.35 + i) * 0.03;
+  });
+  nebulas.forEach((sp, i) => { sp.material.opacity = 0.13 + Math.sin(elapsed * 0.4 + i * 1.9) * 0.04; });
+
+  updateLabels();
+  renderer.render(scene, camera);
+}
+tick();
+
+/* ============================================================ 角色百科 */
+const hexCss = c => '#' + c.toString(16).padStart(6, '0');
+let cxSel = 'WORLD';
+
+function cxHeroHtml(d) {
+  const kc = KEI[d.kei].color;
+  let html = `<div class="cxd">
+    <h1><span style="color:${hexCss(d.color)}">${d.name}</span>
+      <span class="chip" style="--kc:${kc}">${KEI[d.kei].name}</span></h1>
+    <div class="en">${d.id.toUpperCase()}</div>
+    <div class="lore"><p>${d.lore}</p></div>
+    <h2>数值</h2>
+    <div class="cost-line">召唤费用 <b>${d.cost}</b> 点 · 阵亡后费用累加、冷却递增，经验由召唤玉保留</div>
+    <div class="p-stats">
+      ${statCell('hp', '生命', d.hp)}${statCell('atk', '攻击', d.gp)}${statCell('def', '防御', d.fp)}
+    </div>
+    <h2>技能</h2>`;
+  d.skills.forEach((sk, i) => {
+    html += `<div class="act skill ro">
+      <span class="sk-head"><span class="sk-nm">${sk.name}</span><span class="sk-cost">${d.costs[i]} MP</span></span>
+      <span class="sk-desc">${sk.desc}</span></div>`;
+  });
+  html += `<h2>语录</h2>
+    <div class="quote"><span class="ql">登场</span><span class="qt">「${d.lines.summon}」</span></div>`;
+  for (const q of d.lines.extra) {
+    html += `<div class="quote"><span class="ql">${q.label}</span><span class="qt">「${q.text}」</span></div>`;
+  }
+  html += `<div class="quote"><span class="ql">阵亡</span><span class="qt">「${d.lines.die}」</span></div>
+  </div>`;
+  return html;
+}
+
+function cxWorldHtml() {
+  return `<div class="cxd">
+    <h1><span>拉文德市</span></h1>
+    <div class="en">LAVENDER CITY · FREIN</div>
+    <div class="lore">${WORLD.lore.map(p => `<p>${p}</p>`).join('')}</div>
+  </div>`;
+}
+
+function renderCodex() {
+  const heroIds = Object.keys(HEROES);
+  let html = `<button class="cx-item ${cxSel === 'WORLD' ? 'sel' : ''}" data-id="WORLD" style="--dc:#8b9cff">
+    <span class="dot"></span>拉文德市<span class="knd">世界观</span></button>
+    <div class="cx-sep">英雄 · ${heroIds.length}</div>`;
+  for (const id of heroIds) {
+    const d = HEROES[id];
+    html += `<button class="cx-item ${cxSel === id ? 'sel' : ''}" data-id="${id}" style="--dc:${hexCss(d.color)}">
+      <span class="dot"></span>${d.name}<span class="knd">${KEI[d.kei].name}</span></button>`;
+  }
+  $('#cxList').innerHTML = html;
+  $('#cxList').querySelectorAll('.cx-item').forEach(b => {
+    b.onclick = () => { cxSel = b.dataset.id; sfx.select(); renderCodex(); };
+  });
+  $('#cxDetail').innerHTML = cxSel === 'WORLD' ? cxWorldHtml() : cxHeroHtml(HEROES[cxSel]);
+  $('#cxDetail').scrollTop = 0;
+}
+
+$('#codexBtn').onclick = () => { $('#codex').classList.remove('hidden'); sfx.jade(); renderCodex(); };
+$('#codexClose').onclick = () => { $('#codex').classList.add('hidden'); sfx.select(); };
+
+// 无头测试钩子
+window.__g = {
+  game, ui,
+  jade: i => clickJade(game.you.jades[i], document.querySelectorAll('.jade')[i]),
+  pad: lane => clickOwnPad(lane),
+  select: h => { ui.selected = h; renderPanel(); },
+  cmd: (h, c) => clickCommand(h, c),
+  target: h => clickTarget(h),
+  end: () => $('#endTurn').click(),
+  playing: () => playing,
+};
+
+// 无头视觉验证：window.__shot('name') 把当前帧 POST 到 serve.js 的 /shot
+window.__shot = (name = 'shot') => {
+  renderer.render(scene, camera);
+  const data = canvas.toDataURL('image/jpeg', 0.85);
+  return fetch('/shot', { method: 'POST', body: JSON.stringify({ name, data }) }).then(r => r.text());
+};

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fungred</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div id="killflash"></div>
+
+<div id="labels"></div>
+
+<header id="topbar">
+  <div class="tb-left">
+    <span class="logo">FUNGRED</span>
+    <span class="tb-turn">回合 <b id="turnNum">0</b></span>
+  </div>
+  <div class="tb-right">
+    <button id="codexBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5V5a2 2 0 0 1 2-2h13v16H6.5A2.5 2.5 0 0 0 4 21.5v-2Z"/><path d="M19 19H6.5A2.5 2.5 0 0 0 4 21.5"/><path d="M9 7h7M9 10.5h5"/></svg>
+      百科
+    </button>
+    <span class="pts you">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M12 2 L19 9 L12 22 L5 9 Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" fill="currentColor" fill-opacity="0.25"/></svg>
+      我方召唤点 <b id="ptsYou">5</b>
+    </span>
+    <span class="pts ene">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M12 2 L19 9 L12 22 L5 9 Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" fill="currentColor" fill-opacity="0.25"/></svg>
+      敌方召唤点 <b id="ptsEne">5</b>
+    </span>
+  </div>
+</header>
+
+<div id="banner"></div>
+
+<aside id="panel" class="hidden"></aside>
+
+<footer id="bottombar">
+  <div id="jades"></div>
+  <button id="endTurn">
+    结束回合
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
+  </button>
+</footer>
+
+<div id="codex" class="hidden">
+  <div class="cx-head">
+    <span class="cx-title">芬格雷德百科</span>
+    <span class="cx-sub">FUNGRED CODEX</span>
+    <button id="codexClose">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="cx-body">
+    <nav id="cxList"></nav>
+    <article id="cxDetail"></article>
+  </div>
+</div>
+
+<div id="overlay" class="hidden">
+  <div class="ov-card">
+    <h1 id="ovTitle"></h1>
+    <p id="ovSub"></p>
+    <button id="replay">再来一局</button>
+  </div>
+</div>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
