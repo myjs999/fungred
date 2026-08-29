@@ -141,17 +141,34 @@ body.busy #gl { cursor: wait; }
 .jade {
   width: 80px; padding: 8px 6px 7px;
   display: flex; flex-direction: column; align-items: center; gap: 3px;
-  background: var(--glass); border: 1px solid var(--glass-brd);
+  background:
+    linear-gradient(160deg, rgba(150, 168, 255, 0.08), transparent 45%),
+    var(--glass);
+  border: 1px solid var(--glass-brd);
   border-radius: 13px; backdrop-filter: blur(8px);
   color: var(--ink); cursor: pointer;
   transition: transform 0.18s ease, border-color 0.18s, box-shadow 0.18s, opacity 0.18s;
   font-family: inherit;
+  position: relative; overflow: hidden;
 }
+.jade::after { /* 悬停流光 */
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(115deg, transparent 35%, rgba(255, 255, 255, 0.13) 50%, transparent 65%);
+  transform: translateX(-130%);
+  transition: transform 0.55s ease;
+  pointer-events: none;
+}
+.jade:hover::after { transform: translateX(130%); }
 .jade:hover { transform: translateY(-5px); border-color: var(--jc); }
 .jade.sel {
   transform: translateY(-8px);
   border-color: var(--jc);
   box-shadow: 0 0 0 1px var(--jc), 0 8px 28px -6px var(--jc);
+  animation: jade-pulse 1.6s ease-in-out infinite;
+}
+@keyframes jade-pulse {
+  0%, 100% { box-shadow: 0 0 0 1px var(--jc), 0 8px 26px -6px var(--jc); }
+  50% { box-shadow: 0 0 0 1px var(--jc), 0 8px 40px -4px var(--jc); }
 }
 .jade.dim { opacity: 0.55; }
 .jade.sel.dim { opacity: 1; }
@@ -179,6 +196,18 @@ body.busy #gl { cursor: wait; }
   border: none; border-radius: 999px; cursor: pointer;
   box-shadow: 0 4px 22px -4px rgba(126, 160, 255, 0.55);
   transition: transform 0.15s, box-shadow 0.15s, filter 0.15s;
+}
+#endTurn { position: relative; overflow: hidden; }
+#endTurn::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(115deg, transparent 35%, rgba(255, 255, 255, 0.35) 50%, transparent 65%);
+  transform: translateX(-130%);
+  animation: btn-shine 3.5s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes btn-shine {
+  0%, 62% { transform: translateX(-130%); }
+  82%, 100% { transform: translateX(130%); }
 }
 #endTurn svg { width: 17px; height: 17px; }
 #endTurn:hover { transform: translateY(-2px); box-shadow: 0 8px 28px -4px rgba(126, 160, 255, 0.7); }

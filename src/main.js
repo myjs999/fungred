@@ -29,7 +29,9 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.08;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x050712);
@@ -48,10 +50,82 @@ function shake(amp = 0.18, ms = 220) {
   shakeLeft = Math.max(shakeLeft, ms / 1000);
 }
 
+/* ---------- 泛光后处理（手写迷你 Bloom 管线） ---------- */
+const POST = (() => {
+  const rtScene = new THREE.WebGLRenderTarget(2, 2, { type: THREE.HalfFloatType });
+  const rtA = new THREE.WebGLRenderTarget(2, 2, { type: THREE.HalfFloatType, depthBuffer: false });
+  const rtB = new THREE.WebGLRenderTarget(2, 2, { type: THREE.HalfFloatType, depthBuffer: false });
+  const quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const mkMat = (frag, uniforms) => new THREE.ShaderMaterial({
+    uniforms,
+    vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+    fragmentShader: frag,
+    depthTest: false, depthWrite: false,
+  });
+  const brightMat = mkMat(`
+    uniform sampler2D tex; varying vec2 vUv;
+    void main(){
+      vec3 c = texture2D(tex, vUv).rgb;
+      float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      gl_FragColor = vec4(c * smoothstep(0.52, 1.0, l), 1.0);
+    }`, { tex: { value: null } });
+  const blurMat = mkMat(`
+    uniform sampler2D tex; uniform vec2 dir; varying vec2 vUv;
+    void main(){
+      vec3 s = texture2D(tex, vUv).rgb * 0.227;
+      s += (texture2D(tex, vUv + dir * 1.384).rgb + texture2D(tex, vUv - dir * 1.384).rgb) * 0.316;
+      s += (texture2D(tex, vUv + dir * 3.230).rgb + texture2D(tex, vUv - dir * 3.230).rgb) * 0.070;
+      gl_FragColor = vec4(s, 1.0);
+    }`, { tex: { value: null }, dir: { value: new THREE.Vector2() } });
+  const addMat = mkMat(`
+    uniform sampler2D tex; uniform float k; varying vec2 vUv;
+    void main(){ gl_FragColor = vec4(texture2D(tex, vUv).rgb * k, 1.0); }`,
+    { tex: { value: null }, k: { value: 0.85 } });
+  addMat.blending = THREE.AdditiveBlending;
+  addMat.transparent = true;
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), brightMat);
+  const quadScene = new THREE.Scene();
+  quadScene.add(quad);
+  return {
+    setSize(w, h) {
+      rtScene.setSize(w >> 1, h >> 1);
+      rtA.setSize(w >> 2, h >> 2);
+      rtB.setSize(w >> 2, h >> 2);
+    },
+    render() {
+      renderer.setRenderTarget(rtScene);
+      renderer.render(scene, camera);
+      quad.material = brightMat;
+      brightMat.uniforms.tex.value = rtScene.texture;
+      renderer.setRenderTarget(rtA);
+      renderer.render(quadScene, quadCam);
+      for (let i = 0; i < 2; i++) {
+        quad.material = blurMat;
+        blurMat.uniforms.tex.value = rtA.texture;
+        blurMat.uniforms.dir.value.set(1 / rtA.width, 0);
+        renderer.setRenderTarget(rtB);
+        renderer.render(quadScene, quadCam);
+        blurMat.uniforms.tex.value = rtB.texture;
+        blurMat.uniforms.dir.value.set(0, 1 / rtA.height);
+        renderer.setRenderTarget(rtA);
+        renderer.render(quadScene, quadCam);
+      }
+      renderer.setRenderTarget(null);
+      renderer.render(scene, camera);
+      quad.material = addMat;
+      addMat.uniforms.tex.value = rtA.texture;
+      renderer.autoClear = false;
+      renderer.render(quadScene, quadCam);
+      renderer.autoClear = true;
+    },
+  };
+})();
+
 function onResize() {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  POST.setSize(innerWidth * Math.min(devicePixelRatio, 2), innerHeight * Math.min(devicePixelRatio, 2));
 }
 addEventListener('resize', onResize);
 onResize();
@@ -59,6 +133,15 @@ onResize();
 scene.add(new THREE.HemisphereLight(0x93a3ff, 0x0a0a16, 0.55));
 const dirLight = new THREE.DirectionalLight(0xfff4e0, 1.5);
 dirLight.position.set(6, 14, 7);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.set(1024, 1024);
+dirLight.shadow.camera.left = -9;
+dirLight.shadow.camera.right = 9;
+dirLight.shadow.camera.top = 10;
+dirLight.shadow.camera.bottom = -10;
+dirLight.shadow.camera.near = 2;
+dirLight.shadow.camera.far = 40;
+dirLight.shadow.bias = -0.002;
 scene.add(dirLight);
 const youGlowL = new THREE.PointLight(0x8b9cff, 5, 14); youGlowL.position.set(0, 3.4, 5.6); scene.add(youGlowL);
 const eneGlowL = new THREE.PointLight(0xff5265, 5, 14); eneGlowL.position.set(0, 3.4, -5.6); scene.add(eneGlowL);
@@ -147,25 +230,64 @@ function textTexture(text, sub) {
     depthWrite: false, blending: THREE.AdditiveBlending, color: 0xaebaff,
   })));
 }
+// 动态星云背景（fbm 噪声 shader）
+const nebulaMat = new THREE.ShaderMaterial({
+  uniforms: { t: { value: 0 } },
+  depthWrite: false,
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `
+    uniform float t; varying vec2 vUv;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float noise(vec2 p){
+      vec2 i = floor(p), f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x),
+                 mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y);
+    }
+    float fbm(vec2 p){
+      float s = 0.0, a = 0.5;
+      for (int i = 0; i < 5; i++) { s += a * noise(p); p *= 2.02; a *= 0.5; }
+      return s;
+    }
+    void main(){
+      vec2 uv = vUv * vec2(3.0, 1.6);
+      float n1 = fbm(uv + vec2(t * 0.010, 0.0));
+      float n2 = fbm(uv * 1.7 - vec2(t * 0.008, t * 0.004));
+      float n3 = fbm(uv * 0.8 + 7.3 + vec2(0.0, t * 0.006));
+      vec3 col = vec3(0.014, 0.018, 0.045);
+      col += vec3(0.10, 0.13, 0.38) * pow(n1, 2.2) * 1.35;
+      col += vec3(0.30, 0.12, 0.42) * pow(n2, 2.6) * 1.05;
+      col += vec3(0.55, 0.14, 0.20) * pow(n3, 3.2) * 0.85;
+      float vg = smoothstep(1.05, 0.35, abs(vUv.y - 0.55) * 1.6);
+      gl_FragColor = vec4(col * vg, 1.0);
+    }`,
+});
+// 相机俯视，可见的"天空"其实在地平线下方远处——背景板放在那里
+const nebulaBg = new THREE.Mesh(new THREE.PlaneGeometry(420, 260), nebulaMat);
+nebulaBg.position.set(0, -55, -95);
+nebulaBg.rotation.x = -0.42;
+nebulaBg.renderOrder = -1;
+scene.add(nebulaBg);
+
 // 远处星云光斑
 const nebulas = [];
-[[0x5b8cff, -34, 10, -60, 46], [0xa15bff, 30, 16, -70, 60], [0xff5265, 4, 6, -80, 40]].forEach(([col, x, y, z, s]) => {
+[[0x5b8cff, -30, -18, -60, 46], [0xa15bff, 28, -26, -70, 60], [0xff5265, 2, -14, -75, 40]].forEach(([col, x, y, z, s]) => {
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({
     map: TEX_GLOW, color: col, transparent: true, opacity: 0.16,
-    depthWrite: false, blending: THREE.AdditiveBlending,
+    depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
   }));
   sp.position.set(x, y, z); sp.scale.setScalar(s);
   scene.add(sp); nebulas.push(sp);
 });
 // 彩蛋：原版「梦想卡」漂浮在远景中
 const dreamCards = [];
-[['hello, world', 'Fungred · 2022', -10.5, 4.6, -13], ['make it.', 'cause I\'m myjs999', 10.8, 5.4, -14]].forEach(([t, s, x, y, z]) => {
+[['hello, world', 'Fungred · 2022', -11.5, -7.5, -19], ['make it.', 'cause I\'m myjs999', 11.8, -8.5, -21]].forEach(([t, s, x, y, z]) => {
   const m = new THREE.Mesh(
     new THREE.PlaneGeometry(4.6, 2.3),
     new THREE.MeshBasicMaterial({ map: textTexture(t, s), transparent: true, opacity: 0.85, depthWrite: false })
   );
   m.position.set(x, y, z);
-  m.rotation.x = -0.12;
+  m.rotation.x = -0.55;
   scene.add(m); dreamCards.push(m);
 });
 
@@ -180,11 +302,41 @@ function heroWorldPos(h) {
   return new THREE.Vector3(LANE_X[h.lane], TOP_Y, zs * PAD_Z);
 }
 
+// 桌面纹理：径向渐变 + 细网格 + 噪点 + 双线框
+function boardTexture() {
+  const S = 1024;
+  const c = document.createElement('canvas'); c.width = c.height = S;
+  const g = c.getContext('2d');
+  const grd = g.createRadialGradient(S / 2, S / 2, 60, S / 2, S / 2, S * 0.72);
+  grd.addColorStop(0, '#141a3e');
+  grd.addColorStop(0.55, '#0e1229');
+  grd.addColorStop(1, '#070a1c');
+  g.fillStyle = grd; g.fillRect(0, 0, S, S);
+  g.strokeStyle = 'rgba(130, 150, 255, 0.05)';
+  g.lineWidth = 1;
+  for (let i = 64; i < S; i += 64) {
+    g.beginPath(); g.moveTo(i, 0); g.lineTo(i, S); g.stroke();
+    g.beginPath(); g.moveTo(0, i); g.lineTo(S, i); g.stroke();
+  }
+  for (let i = 0; i < 1600; i++) {
+    g.fillStyle = `rgba(160, 175, 255, ${Math.random() * 0.05})`;
+    g.fillRect(Math.random() * S, Math.random() * S, 1.5, 1.5);
+  }
+  g.strokeStyle = 'rgba(140, 160, 255, 0.16)'; g.lineWidth = 3;
+  g.strokeRect(14, 14, S - 28, S - 28);
+  g.strokeStyle = 'rgba(140, 160, 255, 0.07)'; g.lineWidth = 1.5;
+  g.strokeRect(30, 30, S - 60, S - 60);
+  const tex = new THREE.CanvasTexture(c);
+  tex.anisotropy = 8;
+  return tex;
+}
+
 // 悬浮石台
 {
   const slabMat = new THREE.MeshStandardMaterial({ color: 0x141833, roughness: 0.85, metalness: 0.2 });
   const slab = new THREE.Mesh(new THREE.BoxGeometry(14.6, 0.7, 13.6), slabMat);
   slab.position.y = TOP_Y - 0.35;
+  slab.receiveShadow = true;
   scene.add(slab);
   const under = new THREE.Mesh(new THREE.BoxGeometry(12.8, 1.4, 11.8),
     new THREE.MeshStandardMaterial({ color: 0x0c0f24, roughness: 0.95 }));
@@ -196,8 +348,9 @@ function heroWorldPos(h) {
   edge.position.y = TOP_Y - 0.045;
   scene.add(edge);
   const top = new THREE.Mesh(new THREE.BoxGeometry(14.4, 0.06, 13.4),
-    new THREE.MeshStandardMaterial({ color: 0x10142e, roughness: 0.75, metalness: 0.3 }));
+    new THREE.MeshStandardMaterial({ map: boardTexture(), roughness: 0.72, metalness: 0.25 }));
   top.position.y = TOP_Y - 0.028;
+  top.receiveShadow = true;
   scene.add(top);
   // 中线
   const mid = new THREE.Mesh(new THREE.PlaneGeometry(13.4, 0.06),
@@ -521,6 +674,75 @@ function buildBaseMesh(side) {
   return g;
 }
 
+/* ============================================================ 粒子 */
+const particles = [];
+function spawnBurst(pos, color, { n = 12, speed = 2.2, up = 1.6, life = 0.55, size = 0.28, gravity = 4.5 } = {}) {
+  if (instant()) return;
+  for (let i = 0; i < n; i++) {
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: TEX_GLOW, color, transparent: true, opacity: 0.9,
+      depthWrite: false, blending: THREE.AdditiveBlending,
+    }));
+    sp.position.copy(pos);
+    sp.scale.setScalar(size * (0.6 + Math.random() * 0.8));
+    const a = Math.random() * Math.PI * 2;
+    const r = (0.3 + Math.random() * 0.7) * speed;
+    particles.push({
+      sp, t: 0, life: life * (0.7 + Math.random() * 0.6), gravity,
+      vx: Math.cos(a) * r, vy: up * (0.4 + Math.random()), vz: Math.sin(a) * r,
+    });
+    scene.add(sp);
+  }
+}
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.t += dt;
+    if (p.t >= p.life) {
+      scene.remove(p.sp);
+      p.sp.material.dispose();
+      particles.splice(i, 1);
+      continue;
+    }
+    p.vy -= p.gravity * dt;
+    p.sp.position.x += p.vx * dt;
+    p.sp.position.y += p.vy * dt;
+    p.sp.position.z += p.vz * dt;
+    p.sp.material.opacity = 0.9 * (1 - p.t / p.life);
+  }
+}
+
+// 环境浮尘：缓慢上升的微光
+const dust = (() => {
+  const n = 130;
+  const pos = new Float32Array(n * 3);
+  const vel = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    pos[i * 3] = (Math.random() - 0.5) * 16;
+    pos[i * 3 + 1] = 0.3 + Math.random() * 6;
+    pos[i * 3 + 2] = (Math.random() - 0.5) * 14;
+    vel[i] = 0.12 + Math.random() * 0.3;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const pts = new THREE.Points(geo, new THREE.PointsMaterial({
+    size: 0.09, map: TEX_GLOW, transparent: true, opacity: 0.4,
+    depthWrite: false, blending: THREE.AdditiveBlending, color: 0x93a3ff,
+  }));
+  scene.add(pts);
+  return {
+    update(dt, elapsed) {
+      const a = geo.attributes.position.array;
+      for (let i = 0; i < n; i++) {
+        a[i * 3 + 1] += vel[i] * dt;
+        a[i * 3] += Math.sin(elapsed * 0.5 + i) * 0.0015;
+        if (a[i * 3 + 1] > 6.5) a[i * 3 + 1] = 0.3;
+      }
+      geo.attributes.position.needsUpdate = true;
+    },
+  };
+})();
+
 /* ============================================================ 标签（DOM 投影） */
 const labelLayer = $('#labels');
 const visuals = new Map(); // hero.uid -> {group, label, offY, lift}
@@ -538,7 +760,7 @@ function attachVisual(h, { hidden = false } = {}) {
   group.position.copy(pos);
   if (hidden) group.position.y = pos.y - 4.2;
   if (h.side === 1 && !h.isBase) group.rotation.y = Math.PI;
-  group.traverse(o => { o.userData.pickHero = h; });
+  group.traverse(o => { o.userData.pickHero = h; if (o.isMesh) o.castShadow = true; });
   scene.add(group);
   const label = makeLabel(h);
   if (hidden) label.style.opacity = '0';
@@ -623,6 +845,10 @@ function hitFlash(h) {
     if (t < 1 && !instant()) nextFrame(step); else scene.remove(sp);
   })(t0);
   if (!h.isBase && !h.dead) v.punch = 1; // tick 中衰减的弹缩
+  // 命中火花
+  const hp = v.group.position.clone();
+  hp.y += h.isBase ? 2.2 : 1.2;
+  spawnBurst(hp, 0xffd9a6, { n: 9, speed: 2.6, up: 1.8, life: 0.4, size: 0.2 });
 }
 
 function popupDamage(ev) {
@@ -708,6 +934,11 @@ async function animDie(ev) {
           if (t < 1) nextFrame(step); else res();
         })(t0);
       });
+      // 死亡消散粒子
+      const dp = g.position.clone();
+      dp.y = Math.max(dp.y, TOP_Y) + 0.9;
+      const dc = ev.h.isBase ? SIDE_HEX[ev.h.side] : ev.h.def.color;
+      spawnBurst(dp, dc, { n: ev.h.isBase ? 30 : 18, speed: 1.6, up: 2.4, life: 0.9, size: 0.3, gravity: 1.2 });
       removeVisual(ev.h);
     }
   }
@@ -764,6 +995,7 @@ async function animSummon(ev) {
   v.group.position.copy(target);
   v.label.style.opacity = '';
   scene.remove(ring); scene.remove(beam);
+  spawnBurst(new THREE.Vector3(target.x, TOP_Y + 0.5, target.z), c, { n: 16, speed: 3, up: 1.2, life: 0.5, size: 0.26, gravity: 2 });
   if (h.def && h.def.lines) { // 登场台词
     popupShow({ h, text: '「' + h.def.lines.summon + '」', color: '#dfe4ff', ms: 1800 });
   }
@@ -1195,9 +1427,12 @@ function tick() {
     m.rotation.z = Math.sin(elapsed * 0.35 + i) * 0.03;
   });
   nebulas.forEach((sp, i) => { sp.material.opacity = 0.13 + Math.sin(elapsed * 0.4 + i * 1.9) * 0.04; });
+  nebulaMat.uniforms.t.value = elapsed;
+  updateParticles(dt);
+  dust.update(dt, elapsed);
 
   updateLabels();
-  renderer.render(scene, camera);
+  POST.render();
 }
 tick();
 
@@ -1276,7 +1511,7 @@ window.__g = {
 
 // 无头视觉验证：window.__shot('name') 把当前帧 POST 到 serve.js 的 /shot
 window.__shot = (name = 'shot') => {
-  renderer.render(scene, camera);
+  POST.render();
   const data = canvas.toDataURL('image/jpeg', 0.85);
   return fetch('/shot', { method: 'POST', body: JSON.stringify({ name, data }) }).then(r => r.text());
 };
