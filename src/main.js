@@ -1,10 +1,11 @@
 // Fungred 复刻版 —— Three.js 场景 / 表现层 / UI
 import * as THREE from '../three.module.js';
-import { HEROES, KEI, WORLD } from './data.js';
+import { HEROES, KEI, WORLD, CARDS } from './data.js';
 import {
   game, fxQueue, initGame, createHero, allHeroes, opposite,
   attack, castSkill, validateTarget, playerSummon,
   runEnemyTurnAndPrepare, heroDieCleanup, LANES, LANE_CAP,
+  skillPrecheck, cardPrecheck, validateCardTarget, playCard,
 } from './game.js';
 import { sfx, unlockAudio } from './audio.js';
 
@@ -123,6 +124,17 @@ const POST = (() => {
 
 function onResize() {
   camera.aspect = innerWidth / innerHeight;
+  if (camera.aspect < 0.8) {
+    // 竖屏（手机）：接近俯视，并按水平视角反推垂直视角，保证四条战线都在画面内
+    camera.position.set(0, 21, 8.5);
+    camera.fov = Math.min(95, 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(21)) / camera.aspect) * 180 / Math.PI);
+    camera.lookAt(0, -0.5, 1.2);
+  } else {
+    camera.position.set(0, 13.4, 10.8);
+    camera.fov = 46;
+    camera.lookAt(0, -0.6, -0.9);
+  }
+  camBasePos.copy(camera.position);
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
   POST.setSize(innerWidth * Math.min(devicePixelRatio, 2), innerHeight * Math.min(devicePixelRatio, 2));
@@ -514,117 +526,163 @@ function buildHeroMesh(def) {
     ant.position.set(0.16, 1.95, 0);
     body.add(ant);
     addGlowSprite(body, c, 1.0, 1.4);
-  } else if (def.id === 'Orwen') {
-    // 荆棘守卫：粗壮树干 + 环生尖刺 + 顶部晶芽
-    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.44, 1.35, 10), stdMat(0x3d4a1e, { emissiveIntensity: 0.12 }));
-    trunk.position.y = 0.68;
-    body.add(trunk);
-    for (let i = 0; i < 7; i++) {
-      const a = i / 7 * Math.PI * 2;
-      const yy = 0.45 + (i % 3) * 0.35;
-      const thorn = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.42, 6), stdMat(0x86a832, { emissiveIntensity: 0.3 }));
-      thorn.position.set(Math.cos(a) * 0.42, yy, Math.sin(a) * 0.42);
-      thorn.rotation.set(Math.sin(a) * 1.3, 0, -Math.cos(a) * 1.3);
-      body.add(thorn);
-    }
-    const bud = new THREE.Mesh(new THREE.OctahedronGeometry(0.32), crystalMat(c));
-    bud.scale.set(0.8, 1.25, 0.8); bud.position.y = 1.7;
-    body.add(bud);
-    g.userData.spinPart = bud;
-    for (const s of [-1, 1]) { // 肩甲树皮板
-      const plate = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.55, 0.5), stdMat(0x55632b, { emissiveIntensity: 0.15 }));
-      plate.position.set(s * 0.52, 1.15, 0);
-      plate.rotation.z = s * -0.25;
-      body.add(plate);
-    }
-    addGlowSprite(body, c, 1.6, 1.5);
-  } else if (def.id === 'Vermeil') {
-    // 星轨咒师：纤细法袍 + 环绕星辰
-    const robe = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.48, 1.55, 20), stdMat(0x2f2359, { emissiveIntensity: 0.18 }));
-    robe.position.y = 0.78;
-    body.add(robe);
-    const head = new THREE.Mesh(new THREE.OctahedronGeometry(0.2), crystalMat(0xe6d9ff));
-    head.position.y = 1.78;
+  } else if (def.id === 'Simendes') {
+    // 天工机巧：敦实机甲锤匠 + 合金转轴锤 + 背后齿轮
+    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.85, 0.55), stdMat(0x5c3b16, { emissiveIntensity: 0.14 }));
+    torso.position.y = 0.8;
+    body.add(torso);
+    const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.17), crystalMat(c));
+    core.position.set(0, 0.92, 0.29);
+    body.add(core);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.38, 0.42), stdMat(0x7a5221, { emissiveIntensity: 0.18 }));
+    head.position.y = 1.44;
     body.add(head);
+    const visor = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.07, 0.02), crystalMat(0xffc47a));
+    visor.position.set(0, 1.46, 0.22);
+    body.add(visor);
+    const hammer = new THREE.Group();
+    const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.3, 8), stdMat(0x3a3a44, { emissiveIntensity: 0.05 }));
+    hammer.add(handle);
+    const hHead = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.17, 0.5, 12), stdMat(0xb07a36, { emissiveIntensity: 0.25, metalness: 0.6 }));
+    hHead.rotation.z = Math.PI / 2;
+    hHead.position.y = 0.62;
+    hammer.add(hHead);
+    const hRing = new THREE.Mesh(new THREE.TorusGeometry(0.18, 0.03, 8, 20), crystalMat(c));
+    hRing.rotation.y = Math.PI / 2;
+    hRing.position.y = 0.62;
+    hammer.add(hRing);
+    hammer.position.set(0.58, 1.0, 0.05);
+    hammer.rotation.z = -0.5;
+    body.add(hammer);
+    const gear = new THREE.Mesh(new THREE.TorusGeometry(0.34, 0.07, 6, 12), stdMat(0xe08a2c, { emissiveIntensity: 0.45, metalness: 0.5 }));
+    gear.position.set(0, 1.05, -0.36);
+    body.add(gear);
+    g.userData.ringPart = gear;
+    addGlowSprite(body, c, 1.0, 1.4);
+  } else if (def.id === 'Heilbenlia') {
+    // 人鱼之恋：弯曲鱼尾 + 尾鳍 + 珍珠
+    const tail = new THREE.Group();
+    for (let i = 0; i < 5; i++) {
+      const seg = new THREE.Mesh(new THREE.SphereGeometry(0.28 - i * 0.045, 16, 12), crystalMat(i % 2 ? 0x2aa6c4 : c));
+      seg.scale.set(1, 0.8, 1);
+      seg.position.set(Math.sin(i * 0.5) * 0.14, 0.22 + i * 0.03, -i * 0.2);
+      tail.add(seg);
+    }
+    for (const s of [-1, 1]) {
+      const fin = new THREE.Mesh(new THREE.OctahedronGeometry(0.22), crystalMat(0x9fe8f8));
+      fin.scale.set(1.2, 0.18, 0.6);
+      fin.position.set(0.1 + s * 0.2, 0.36, -1.0);
+      fin.rotation.y = s * 0.6;
+      tail.add(fin);
+    }
+    body.add(tail);
+    const torso = new THREE.Mesh(new THREE.SphereGeometry(0.28, 20, 16), crystalMat(c));
+    torso.scale.set(0.9, 1.3, 0.8);
+    torso.position.y = 0.8;
+    body.add(torso);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 18, 14), crystalMat(0xd8f6ff));
+    head.position.y = 1.32;
+    body.add(head);
+    const hair = new THREE.Mesh(new THREE.ConeGeometry(0.24, 0.7, 10), stdMat(0x1e6f8a, { emissiveIntensity: 0.3 }));
+    hair.position.set(0, 1.1, -0.12);
+    hair.rotation.x = 0.25;
+    body.add(hair);
+    const pearl = new THREE.Mesh(new THREE.SphereGeometry(0.11, 16, 12), crystalMat(0xffffff));
+    pearl.position.set(0.42, 1.2, 0.1);
+    body.add(pearl);
+    const wave = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.02, 8, 40), stdMat(0x7fe3f5, { emissiveIntensity: 0.6 }));
+    wave.position.y = 0.9; wave.rotation.x = Math.PI / 2 - 0.3;
+    body.add(wave);
+    g.userData.ringPart = wave;
+    g.userData.spinPart = pearl;
+    addGlowSprite(body, c, 1.0, 1.6);
+  } else if (def.id === 'Price') {
+    // 书虫 / 天文爱好者：学者长袍 + 悬浮翻开的书 + 环绕星辰
+    const robe = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.5, 1.5, 20), stdMat(0x2c2a60, { emissiveIntensity: 0.18 }));
+    robe.position.y = 0.75;
+    body.add(robe);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 18, 14), crystalMat(0xe6e4ff));
+    head.position.y = 1.68;
+    body.add(head);
+    const book = new THREE.Group();
+    for (const s of [-1, 1]) {
+      const page = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.02, 0.38), stdMat(0xf2eedc, { emissiveIntensity: 0.35 }));
+      page.position.x = s * 0.15;
+      page.rotation.z = s * -0.25;
+      book.add(page);
+    }
+    const spine = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.05, 0.4), stdMat(0x5a3d8a, { emissiveIntensity: 0.3 }));
+    book.add(spine);
+    book.position.set(0, 1.15, 0.42);
+    book.rotation.x = -0.6;
+    body.add(book);
     const orbit = new THREE.Group();
-    orbit.position.y = 1.3;
+    orbit.position.y = 1.35;
     for (let i = 0; i < 3; i++) {
       const a = i / 3 * Math.PI * 2;
-      const star = new THREE.Mesh(new THREE.OctahedronGeometry(0.1), crystalMat(c));
-      star.position.set(Math.cos(a) * 0.62, Math.sin(a * 2) * 0.12, Math.sin(a) * 0.62);
+      const star = new THREE.Mesh(new THREE.OctahedronGeometry(0.09), crystalMat(c));
+      star.position.set(Math.cos(a) * 0.6, Math.sin(a * 2) * 0.12, Math.sin(a) * 0.6);
       orbit.add(star);
     }
     body.add(orbit);
     g.userData.spinPart = orbit;
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.62, 0.02, 8, 44), stdMat(0xc9b6ff, { emissiveIntensity: 0.55 }));
-    ring.position.y = 1.3; ring.rotation.x = Math.PI / 2 - 0.25;
-    body.add(ring);
-    g.userData.ringPart = ring;
-    addGlowSprite(body, c, 1.4, 1.7);
-  } else if (def.id === 'Kulom') {
-    // 攻城重炮：履带底盘 + 仰角炮管
-    const chassis = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.42, 0.72), stdMat(0x5a3a1a, { emissiveIntensity: 0.12 }));
-    chassis.position.y = 0.42;
-    body.add(chassis);
-    for (const s of [-1, 1]) {
-      const tread = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.3, 0.85), stdMat(0x2c2c34, { emissiveIntensity: 0.06 }));
-      tread.position.set(s * 0.55, 0.22, 0);
-      body.add(tread);
-    }
-    const turret = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.34, 0.5), stdMat(0x7a4d1e, { emissiveIntensity: 0.15 }));
-    turret.position.y = 0.8;
-    body.add(turret);
-    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.12, 1.25, 12), stdMat(0x8a5a24, { emissiveIntensity: 0.2 }));
-    barrel.position.set(0, 1.25, -0.42);
-    barrel.rotation.x = Math.PI / 2 - 0.75; // 仰角朝前
-    body.add(barrel);
-    const muzzle = new THREE.Mesh(new THREE.TorusGeometry(0.11, 0.035, 8, 20), crystalMat(c));
-    muzzle.position.set(0, 1.67, -0.87);
-    muzzle.rotation.x = Math.PI / 2 - 0.75;
-    body.add(muzzle);
-    const core = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.2, 0.52), crystalMat(c));
-    core.position.y = 0.62;
-    body.add(core);
-    addGlowSprite(body, c, 0.9, 1.4);
-  } else if (def.id === 'Tio') {
-    // 茶之精灵：叶裙小灵 + 头顶嫩芽
-    const skirt = new THREE.Mesh(new THREE.ConeGeometry(0.5, 0.85, 9), stdMat(0x1f6e58, { emissiveIntensity: 0.2 }));
-    skirt.position.y = 0.45;
-    body.add(skirt);
-    const bodyBall = new THREE.Mesh(new THREE.SphereGeometry(0.3, 20, 14), crystalMat(c));
-    bodyBall.position.y = 1.02;
-    body.add(bodyBall);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 18, 12), crystalMat(0xd8fff2));
+    addGlowSprite(body, c, 1.4, 1.6);
+  } else if (def.id === 'Missli') {
+    // 守林先锋：兜帽斗篷 + 长弓 + 环绕的叶片
+    const cloak = new THREE.Mesh(new THREE.ConeGeometry(0.5, 1.4, 10), stdMat(0x3f5d1c, { emissiveIntensity: 0.16 }));
+    cloak.position.y = 0.7;
+    body.add(cloak);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.21, 18, 14), crystalMat(0xf1ffd8));
     head.position.y = 1.5;
     body.add(head);
-    for (const s of [-1, 1]) { // 头顶双叶
-      const leaf = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.4, 7), stdMat(0x35c99a, { emissiveIntensity: 0.4 }));
-      leaf.position.set(s * 0.13, 1.82, 0);
-      leaf.rotation.z = s * 0.55;
-      body.add(leaf);
+    const hood = new THREE.Mesh(new THREE.ConeGeometry(0.27, 0.5, 10), stdMat(0x557a26, { emissiveIntensity: 0.2 }));
+    hood.position.set(0, 1.66, -0.05);
+    body.add(hood);
+    const bow = new THREE.Mesh(new THREE.TorusGeometry(0.62, 0.028, 6, 32, Math.PI * 0.9), stdMat(0xc9e67a, { emissiveIntensity: 0.4 }));
+    bow.position.set(-0.52, 1.0, 0.05);
+    bow.rotation.z = Math.PI / 2 + 0.3;
+    body.add(bow);
+    const leaves = new THREE.Group();
+    leaves.position.y = 1.05;
+    for (let i = 0; i < 3; i++) {
+      const a = i / 3 * Math.PI * 2;
+      const leaf = new THREE.Mesh(new THREE.OctahedronGeometry(0.1), crystalMat(c));
+      leaf.scale.set(0.5, 1.4, 0.2);
+      leaf.position.set(Math.cos(a) * 0.62, 0, Math.sin(a) * 0.62);
+      leaves.add(leaf);
     }
-    addGlowSprite(body, c, 1.2, 1.4);
-  } else if (def.id === 'Nocti') {
-    // 暗影蛾：暗色蛾身 + 晶翼 + 触角
-    const moth = new THREE.Mesh(new THREE.OctahedronGeometry(0.3), stdMat(0x241b38, { emissiveIntensity: 0.25 }));
-    moth.scale.set(0.7, 1.9, 0.7); moth.position.y = 1.05;
-    body.add(moth);
+    body.add(leaves);
+    g.userData.spinPart = leaves;
+    addGlowSprite(body, c, 1.1, 1.5);
+  } else if (def.id === 'Ailee') {
+    // 无光之瞳：修长暗袍 + 发光的蒙眼带 + 背后交叉双刃
+    const robe = new THREE.Mesh(new THREE.ConeGeometry(0.42, 1.6, 8), stdMat(0x1c1d2a, { emissiveIntensity: 0.08 }));
+    robe.position.y = 0.8;
+    body.add(robe);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 18, 14), stdMat(0x2a2c3c, { emissiveIntensity: 0.12 }));
+    head.position.y = 1.72;
+    body.add(head);
+    const band = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.035, 6, 24), crystalMat(c));
+    band.position.y = 1.74;
+    band.rotation.x = Math.PI / 2;
+    body.add(band);
     for (const s of [-1, 1]) {
-      const wing = new THREE.Mesh(new THREE.OctahedronGeometry(0.34), crystalMat(c));
-      wing.scale.set(1.35, 0.75, 0.12);
-      wing.position.set(s * 0.5, 1.3, -0.15);
-      wing.rotation.z = s * 0.55;
-      wing.rotation.y = s * 0.3;
-      body.add(wing);
-      const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.4, 5), stdMat(0xe9a6ff, { emissiveIntensity: 0.6 }));
-      ant.position.set(s * 0.1, 1.85, -0.05);
-      ant.rotation.z = s * 0.45;
-      body.add(ant);
+      const blade = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.9, 0.02), crystalMat(0xe2e6f2));
+      blade.position.set(s * 0.18, 1.2, -0.26);
+      blade.rotation.z = s * 0.55;
+      body.add(blade);
     }
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.07, 10, 8), crystalMat(0xffd6ff));
-    eye.position.set(0, 1.6, 0.18);
-    body.add(eye);
-    addGlowSprite(body, c, 1.3, 1.6);
+    const shards = new THREE.Group();
+    shards.position.y = 1.0;
+    for (let i = 0; i < 4; i++) {
+      const a = i / 4 * Math.PI * 2;
+      const sh = new THREE.Mesh(new THREE.TetrahedronGeometry(0.08), stdMat(0x0c0c14, { emissiveIntensity: 0.0 }));
+      sh.position.set(Math.cos(a) * 0.55, Math.sin(a * 3) * 0.15, Math.sin(a) * 0.55);
+      shards.add(sh);
+    }
+    body.add(shards);
+    g.userData.spinPart = shards;
+    addGlowSprite(body, 0xcfd6ea, 1.5, 1.1);
   } else if (def.id === 'Shirley') {
     // 冰灵：雪滴之躯 + 冰晶冠
     const drop = new THREE.Mesh(new THREE.SphereGeometry(0.42, 24, 18), crystalMat(c));
@@ -793,7 +851,8 @@ function labelHtml(h) {
   return `<div class="ln"><span style="color:${KEI[h.kei].color}">${h.name}</span><em>Lv${h.maxexp}</em></div>
     <div class="bar"><i style="width:${ratio * 100}%;background:${hue}"></i></div>
     <div class="nums">HP ${Math.max(0, h.hpShow)}<b>MP ${h.mp}</b></div>
-    <div class="nums ad"><span${gc ? ` style="color:${gc}"` : ''}>攻 ${h.gp}</span><span${fc ? ` style="color:${fc}"` : ''}>防 ${h.fp}</span></div>`;
+    <div class="nums ad"><span${gc ? ` style="color:${gc}"` : ''}>攻 ${h.gp}</span><span${fc ? ` style="color:${fc}"` : ''}>防 ${h.fp}</span></div>
+    ${h.marks ? `<div class="marks">林间标记 ×${h.marks}</div>` : ''}`;
 }
 
 function updateLabels() {
@@ -1027,6 +1086,9 @@ async function playQueue() {
       await animDie(ev);
     }
     else if (ev.t === 'summon') await animSummon(ev);
+    else if (ev.t === 'peek' && ev.side === 0) {
+      msg('夜观天象 · 牌堆顶：' + (ev.ids.length ? ev.ids.map(id => '「' + CARDS[id].name + '」').join(' ') : '牌堆已空'));
+    }
   }
   // 校正显示血量
   for (const s of [game.you, game.ene]) {
@@ -1035,15 +1097,18 @@ async function playQueue() {
   }
   playing = false;
   document.body.classList.remove('busy');
-  refreshTopbar(); refreshJadebar(); renderPanel();
+  refreshTopbar(); refreshJadebar(); renderPanel(); renderHand();
   ensureHeroRefs(); updateLabels();
   if (game.over) showOverlay();
 }
 
 /* ============================================================ UI 状态 */
+// pending：
+//   技能/普攻 { kind:'skill', cmd, sub, need:'hero'|'hero2'|'card'|'jade', picks:{} }
+//   打出卡牌 { kind:'card', idx, need:'hero'|'card' }
 const ui = {
   selected: null,      // 展示面板中的角色
-  pending: null,       // {cmd:'A'|'S1'|'S2'|'S3', sub}
+  pending: null,
   summoningJade: null, // 选中的召唤玉
   hover: null,
 };
@@ -1060,18 +1125,26 @@ function warn(s) {
 
 function cancelPending() {
   ui.pending = null;
-  msg('');
+  msg(game.you && game.you.freeSummon > 0 ? '海蕴生机：选择一颗就绪的召唤玉，免费召唤' : '');
   renderPanel();
+  renderHand();
 }
 function cancelSummon() {
   if (ui.summoningJade) { ui.summoningJade = null; msg(''); refreshJadebar(); }
+}
+function afterAction() {
+  refreshTopbar(); refreshJadebar(); renderHand(); renderPanel();
+  playQueue();
 }
 
 /* ---------- 顶栏 ---------- */
 function refreshTopbar() {
   $('#turnNum').textContent = game.turn;
-  $('#ptsYou').textContent = game.you.pts;
+  const n = game.you.ptsNext;
+  $('#ptsYou').textContent = game.you.pts + (n ? ` (${n > 0 ? '+' : ''}${n})` : '');
+  $('#ptsYou').title = n ? `下回合 ${n > 0 ? '+' : ''}${n}` : '';
   $('#ptsEne').textContent = game.ene.pts;
+  $('#eneHand').textContent = game.ene.hand.length;
 }
 
 /* ---------- 召唤玉栏 ---------- */
@@ -1080,6 +1153,8 @@ const SVG_CRYSTAL = `<svg viewBox="0 0 24 24" fill="none"><path d="M12 2 L19 9 L
 function refreshJadebar() {
   const bar = $('#jades');
   bar.innerHTML = '';
+  const free = game.you.freeSummon > 0;
+  const pickingJade = ui.pending && ui.pending.need === 'jade';
   for (const j of game.you.jades) {
     const el = document.createElement('button');
     el.className = 'jade';
@@ -1089,12 +1164,13 @@ function refreshJadebar() {
     else if (j.cool === -1) { stateHtml = '出战中'; stateCls = 'out'; }
     else { stateHtml = '就绪'; stateCls = 'ready'; }
     if (ui.summoningJade === j) el.classList.add('sel');
-    if (j.cool !== 0 || game.you.pts < j.cost) el.classList.add('dim');
+    if (pickingJade) { if (j.cool === -1) el.classList.add('dim'); else el.classList.add('pick'); }
+    else if (j.cool !== 0 || (game.you.pts < j.cost && !free)) el.classList.add('dim');
     el.style.setProperty('--jc', col);
     el.innerHTML = `
       <span class="ic">${SVG_CRYSTAL}</span>
       <span class="nm">${j.def.name}</span>
-      <span class="cost">${j.cost} 点</span>
+      <span class="cost">${free && j.cool === 0 ? '免费' : j.cost + ' 点'}</span>
       <span class="st ${stateCls}">${stateHtml}</span>
       <span class="exp">EXP ${j.exp}/${j.maxexp}</span>`;
     el.onclick = () => clickJade(j, el);
@@ -1104,11 +1180,21 @@ function refreshJadebar() {
 
 function clickJade(j, el) {
   if (playing || game.over) return;
+  const p = ui.pending;
+  if (p && p.need === 'jade') { // 「图书稽查」第二步
+    if (j.cool === -1) { warn('只能选择不在场的召唤玉'); return; }
+    sfx.skill(p.sub.kei);
+    castSkill(p.sub.defId, p.cmd, p.sub, null, { cardIdx: p.picks.cardIdx, jade: j });
+    ui.pending = null;
+    msg('');
+    afterAction();
+    return;
+  }
   cancelPending();
   if (ui.summoningJade === j) { cancelSummon(); return; }
   if (j.cool === -1) { warn(j.def.name + ' 已在场上'); return; }
   if (j.cool > 0) { warn('召唤玉冷却中：还需 ' + j.cool + ' 回合'); return; }
-  if (game.you.pts < j.cost) {
+  if (game.you.pts < j.cost && game.you.freeSummon <= 0) {
     warn('召唤点不足（需要 ' + j.cost + ' 点）');
     el.classList.add('shake');
     setTimeout(() => el.classList.remove('shake'), 400);
@@ -1118,6 +1204,91 @@ function clickJade(j, el) {
   msg('为「' + j.def.name + '」选择一条我方战线');
   sfx.jade();
   refreshJadebar();
+}
+
+/* ---------- 召唤战术牌（手牌） ---------- */
+const CARD_ICON = {
+  coin: '<circle cx="12" cy="12" r="8"/><path d="M12 7.5v9M9.5 9.5h4a1.8 1.8 0 0 1 0 3.5h-3a1.8 1.8 0 0 0 0 3.5h4"/>',
+  house: '<path d="M4 11 12 4l8 7v9H4z"/><path d="M10 20v-5h4v5"/>',
+  copy: '<rect x="8" y="8" width="11" height="12" rx="1.5"/><path d="M5 16V5.5A1.5 1.5 0 0 1 6.5 4H15"/>',
+  chart: '<path d="M4 19h16"/><path d="M5 15l5-5 3 3 6-7"/><path d="M15 6h4v4"/>',
+  dice: '<rect x="4.5" y="4.5" width="15" height="15" rx="3"/><circle cx="9" cy="9" r="1.2"/><circle cx="15" cy="15" r="1.2"/><circle cx="15" cy="9" r="1.2"/><circle cx="9" cy="15" r="1.2"/>',
+  stack: '<path d="M12 4 3 8.5l9 4.5 9-4.5z"/><path d="m3 12.5 9 4.5 9-4.5"/><path d="m3 16.5 9 4.5 9-4.5"/>',
+  hold: '<rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+  book: '<path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H13v16h5.5a1.5 1.5 0 0 0 1.5-1.5z"/>',
+  drop: '<path d="M12 3.5c3 4 6 7.5 6 10.8A6 6 0 0 1 12 20.3a6 6 0 0 1-6-6c0-3.3 3-6.8 6-10.8z"/>',
+  sword: '<path d="M14.5 4H20v5.5L9 20.5 3.5 15z"/><path d="m7 13 4 4M5 19l-1.5 1.5"/>',
+  apple: '<path d="M12 7c-3-2-7 0-7 5 0 4 3 8 5 8 1 0 1.3-.5 2-.5s1 .5 2 .5c2 0 5-4 5-8 0-5-4-7-7-5z"/><path d="M12 7c0-2 1-3.5 3-4"/>',
+};
+const CARD_ICON_OF = {
+  capital: 'hold', monopoly: 'hold', regulate: 'hold', estate: 'house', invest: 'chart', mortgage: 'chart',
+  forge: 'copy', welfare: 'coin', relief: 'coin', charity: 'book', chance: 'dice', allin: 'stack',
+  nectar: 'drop', oath: 'sword', eerie: 'sword', fruit: 'apple',
+};
+const cardSvg = id => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${CARD_ICON[CARD_ICON_OF[id]]}</svg>`;
+
+function renderHand() {
+  const s = game.you;
+  const p = ui.pending;
+  // 每次待选状态变化都会走到这里：选目标期间给 body 打标记，手机上据此收起挡住棋盘的面板
+  document.body.classList.toggle('picking', !!p);
+  $('#handCount').textContent = `${s.hand.length} / ${s.handLimit}`;
+  $('#handFoot').textContent = `牌堆 ${s.deck.length} · 弃牌 ${s.discard.length}`;
+  const box = $('#handCards');
+  box.innerHTML = '';
+  s.hand.forEach((c, i) => {
+    const d = CARDS[c.id];
+    const el = document.createElement('button');
+    el.className = 'tcard ' + d.kind + (d.passive ? ' passive' : '');
+    if (p && p.kind === 'card' && p.idx === i) el.classList.add('sel');
+    if (p && p.need === 'card') el.classList.add(p.kind === 'card' && p.idx === i ? 'sel' : 'pick');
+    el.innerHTML = `
+      <span class="tc-ic">${cardSvg(c.id)}</span>
+      <span class="tc-main">
+        <span class="tc-nm">${d.name}${d.passive ? '<i>持有</i>' : ''}${d.kind === 'item' ? '<i>物品</i>' : ''}</span>
+        <span class="tc-desc">${d.desc}</span>
+      </span>`;
+    el.onclick = () => clickHandCard(i);
+    box.appendChild(el);
+  });
+}
+
+function clickHandCard(i) {
+  if (playing || game.over) return;
+  const s = game.you;
+  const p = ui.pending;
+  if (p && p.kind === 'skill' && p.need === 'card') { // 「图书稽查」第一步
+    p.picks.cardIdx = i;
+    p.need = 'jade';
+    msg('[图书稽查] 选择一颗不在场的召唤玉');
+    renderHand(); refreshJadebar();
+    return;
+  }
+  if (p && p.kind === 'card' && p.need === 'card') { // 「伪造」选择复制对象
+    if (i === p.idx) { cancelPending(); return; }
+    const t = CARDS[s.hand[i].id];
+    if (s.hand[i].id === 'forge' || t.kind !== 'tac') { warn('只能复制非「伪造」的召唤战术牌'); return; }
+    playCard(s, p.idx, i);
+    ui.pending = null; msg('');
+    sfx.jade();
+    afterAction();
+    return;
+  }
+  if (p && p.kind === 'card' && p.idx === i) { cancelPending(); return; }
+  cancelSummon();
+  const bad = cardPrecheck(s, i);
+  if (bad) { warn(bad); return; }
+  const d = CARDS[s.hand[i].id];
+  if (d.target) {
+    ui.pending = { kind: 'card', idx: i, need: d.target === 'card' ? 'card' : 'hero' };
+    msg('[' + d.name + '] ' + (d.target === 'card' ? '选择手中要复制的牌' : '选择目标角色'));
+    sfx.select();
+    renderHand();
+    return;
+  }
+  playCard(s, i);
+  sfx.jade();
+  afterAction();
 }
 
 /* ---------- 信息面板 ---------- */
@@ -1133,6 +1304,8 @@ function statCell(icon, name, val) {
   return `<div class="stat"><span class="si">${ICONS[icon]}</span><span class="sn">${name}</span><b>${val}</b></div>`;
 }
 
+const skillCostText = (d, costs, i) => (d.costLabel && d.costLabel[i] && costs[i] === d.costs[i]) ? d.costLabel[i] : costs[i];
+
 function renderPanel() {
   const p = $('#panel');
   const h = ui.selected;
@@ -1141,6 +1314,7 @@ function renderPanel() {
   const mine = h.side === 0 && !h.isBase;
   const keiChip = h.kei ? `<span class="chip" style="--kc:${KEI[h.kei].color}">${KEI[h.kei].name}</span>` : '';
   let html = `<div class="p-head"><span class="p-name">${h.name}</span>${keiChip}</div>`;
+  if (h.def && h.def.title) html += `<div class="p-title">${h.def.title}</div>`;
   if (h.isBase) {
     html += `<div class="p-stats">${statCell('hp', '生命', Math.max(0, h.hp) + ' / ' + maxHpOf(h))}</div>
       <div class="p-tip">摧毁${h.side === 0 ? '它你就输了' : '它即可获胜'}。</div>`;
@@ -1150,24 +1324,30 @@ function renderPanel() {
       ${statCell('def', '防御', h.fp)}${statCell('mp', '魔力', h.mp)}
       ${statCell('exp', '经验', h.exp + ' / ' + h.maxexp)}
       <div class="stat"><span class="sn">等级</span><b>Lv ${h.maxexp}</b></div>
-      ${h.defId === 'Vermeil' ? `<div class="stat"><span class="sn">星轨</span><b>×${h.stacks}</b></div>` : ''}
+      ${h.marks ? `<div class="stat"><span class="sn">林间标记</span><b>×${h.marks}</b></div>` : ''}
+      ${h.pierce ? `<div class="stat"><span class="sn">穿透</span><b>${h.pierce}</b></div>` : ''}
     </div>`;
+    if (h.def.passive) {
+      html += `<div class="act skill ro passive-skill">
+        <span class="sk-head"><span class="sk-nm">${h.def.passive.name}</span><span class="sk-cost">被动</span></span>
+        <span class="sk-desc">${h.def.passive.desc}</span></div>`;
+    }
     if (mine) {
       const aDis = h.usableA <= 0 || playing;
       html += `<button class="act atkbtn ${aDis ? 'dis' : ''}" data-cmd="A">
-        <span class="si">${ICONS.atk}</span>普通攻击<em>${h.usableA > 0 ? '' : '已使用'}</em></button>`;
+        <span class="si">${ICONS.atk}</span>普通攻击<em>${h.usableA > 1 ? '剩余 ' + h.usableA + ' 次' : h.usableA > 0 ? '' : '已使用'}</em></button>`;
     }
     html += `<div class="p-skills">`;
     h.def.skills.forEach((sk, i) => {
-      const cost = h.costs[i];
+      const cost = skillCostText(h.def, h.costs, i);
       const usable = h.usable[i] > 0;
-      const afford = h.mp >= cost;
+      const afford = h.mp >= h.costs[i];
       if (mine) {
         const dis = !usable || playing;
         html += `<button class="act skill ${dis ? 'dis' : ''} ${(!afford && usable) ? 'poor' : ''}" data-cmd="S${i + 1}">
           <span class="sk-head"><span class="sk-nm">${sk.name}</span><span class="sk-cost">${cost} MP</span></span>
           <span class="sk-desc">${sk.desc}</span>
-          ${usable ? '' : '<span class="sk-used">本回合已使用</span>'}</button>`;
+          ${usable ? '' : `<span class="sk-used">${h.sealed ? '秘密航线中' : '本回合已使用'}</span>`}</button>`;
       } else {
         html += `<div class="act skill ro">
           <span class="sk-head"><span class="sk-nm">${sk.name}</span><span class="sk-cost">${cost} MP</span></span>
@@ -1187,43 +1367,87 @@ function renderPanel() {
 function clickCommand(h, cmd) {
   if (playing || game.over || h.dead || h.side !== 0) return;
   cancelSummon();
-  if (ui.pending && ui.pending.sub === h && ui.pending.cmd === cmd) { cancelPending(); return; }
+  const p = ui.pending;
+  if (p && p.kind === 'skill' && p.sub === h && p.cmd === cmd) { cancelPending(); return; }
   if (cmd === 'A') {
     if (h.usableA <= 0) return;
-    ui.pending = { cmd, sub: h };
+    ui.pending = { kind: 'skill', cmd, sub: h, need: 'hero', picks: {} };
     msg('请选择攻击目标');
+    renderHand();
     return;
   }
   const i = { S1: 0, S2: 1, S3: 2 }[cmd];
-  if (h.usable[i] <= 0) return;
+  if (h.usable[i] <= 0) { if (h.sealed) warn('海尔本莉亚正在秘密航线中，本回合不能再使用技能'); return; }
   if (h.mp < h.costs[i]) { warn('魔力值不够。'); return; }
+  const bad = skillPrecheck(h, cmd);
+  if (bad) { warn(bad); return; }
   const sk = h.def.skills[i];
   if (sk.instant) { // 无目标技能：立即释放
     sfx.skill(h.kei);
     castSkill(h.defId, cmd, h, null);
     ui.pending = null;
-    playQueue();
+    if (game.you.freeSummon > 0) msg('海蕴生机：选择一颗就绪的召唤玉，免费召唤');
+    afterAction();
     return;
   }
-  ui.pending = { cmd, sub: h };
+  if (sk.pick) {
+    ui.pending = { kind: 'skill', cmd, sub: h, need: 'card', picks: {} };
+    msg('[' + sk.name + '] 选择一张要弃置的战术牌');
+    renderHand();
+    return;
+  }
+  ui.pending = { kind: 'skill', cmd, sub: h, need: 'hero', picks: {} };
   sfx.select();
-  msg('[' + sk.name + '] 请选择目标');
+  msg('[' + sk.name + '] ' + (sk.targets === 2 ? '选择第一个角色' : '请选择目标'));
+  renderHand();
+}
+
+// 当前待选状态下，ob 能否作为目标；返回 null 表示可以
+function pendingHeroError(ob) {
+  const p = ui.pending;
+  if (!p || (p.need !== 'hero' && p.need !== 'hero2')) return '现在不需要选择角色';
+  if (p.kind === 'card') return validateCardTarget(game.you, p.idx, ob);
+  const bad = validateTarget(p.sub, p.cmd, ob);
+  if (bad) return bad;
+  if (p.need === 'hero2' && ob === p.picks.ob1) return '请选择另一个角色';
+  return null;
 }
 
 function clickTarget(ob) {
-  const { cmd, sub } = ui.pending;
-  const bad = validateTarget(sub, cmd, ob);
+  const p = ui.pending;
+  if (p.need === 'card') { warn('请先在左侧选择一张战术牌'); return; }
+  if (p.need === 'jade') { warn('请在下方选择一颗召唤玉'); return; }
+  const bad = pendingHeroError(ob);
   if (bad) { warn(bad); return; }
+  if (p.kind === 'card') {
+    playCard(game.you, p.idx, ob);
+    ui.pending = null; msg('');
+    sfx.jade();
+    afterAction();
+    return;
+  }
+  const { cmd, sub } = p;
+  const sk = cmd === 'A' ? null : sub.def.skills[+cmd[1] - 1];
+  if (sk && sk.targets === 2 && p.need === 'hero') { // 「生命平等」第一目标
+    p.picks.ob1 = ob;
+    p.need = 'hero2';
+    msg('[' + sk.name + '] 选择第二个角色');
+    sfx.select();
+    return;
+  }
   ui.pending = null;
   msg('');
   if (cmd === 'A') {
     const ok = attack(sub, ob);
     if (!ok) warn('未能击穿目标的防御');
+  } else if (p.need === 'hero2') {
+    sfx.skill(sub.kei);
+    castSkill(sub.defId, cmd, sub, p.picks.ob1, { ob2: ob });
   } else {
     sfx.skill(sub.kei);
     castSkill(sub.defId, cmd, sub, ob);
   }
-  playQueue();
+  afterAction();
 }
 
 /* ---------- 结束回合 / 结算 ---------- */
@@ -1233,7 +1457,8 @@ $('#endTurn').onclick = () => {
   ui.selected = null; renderPanel();
   sfx.turn();
   runEnemyTurnAndPrepare();
-  refreshTopbar();
+  msg(game.lastDiscards.length ? '手牌超过上限，弃掉了：' + game.lastDiscards.join('、') : '');
+  refreshTopbar(); renderHand();
   playQueue();
 };
 
@@ -1305,9 +1530,8 @@ function clickOwnPad(lane) {
     const j = ui.summoningJade;
     ui.summoningJade = null;
     playerSummon(j, lane);
-    msg('');
-    refreshTopbar(); refreshJadebar();
-    playQueue();
+    msg(game.you.freeSummon > 0 ? '海蕴生机：选择一颗就绪的召唤玉，免费召唤' : '');
+    afterAction();
   }
 }
 
@@ -1335,6 +1559,7 @@ attachVisual(game.ene.base).heroRef = game.ene.base;
 refreshTopbar();
 refreshJadebar();
 renderPanel();
+renderHand();
 msg('点击下方召唤玉，召唤你的第一位英雄');
 
 // 补充 heroRef（attachVisual 内没有 hero 引用时用于标签渲染）
@@ -1409,7 +1634,7 @@ function tick() {
 
   // 目标指示环：悬停在合法目标上时套圈
   if (ui.pending && ui.hover && !ui.hover.dead) {
-    const bad = validateTarget(ui.pending.sub, ui.pending.cmd, ui.hover);
+    const bad = pendingHeroError(ui.hover);
     const v = visuals.get(ui.hover.uid);
     if (!bad && v) {
       targetRing.visible = true;
@@ -1445,17 +1670,23 @@ function cxHeroHtml(d) {
   let html = `<div class="cxd">
     <h1><span style="color:${hexCss(d.color)}">${d.name}</span>
       <span class="chip" style="--kc:${kc}">${KEI[d.kei].name}</span></h1>
-    <div class="en">${d.id.toUpperCase()}</div>
+    <div class="en">${d.title} · ${d.id.toUpperCase()}</div>
     <div class="lore"><p>${d.lore}</p></div>
+    <div class="cx-src">设定来源：${d.src}</div>
     <h2>数值</h2>
     <div class="cost-line">召唤费用 <b>${d.cost}</b> 点 · 阵亡后费用累加、冷却递增，经验由召唤玉保留</div>
     <div class="p-stats">
       ${statCell('hp', '生命', d.hp)}${statCell('atk', '攻击', d.gp)}${statCell('def', '防御', d.fp)}
     </div>
     <h2>技能</h2>`;
+  if (d.passive) {
+    html += `<div class="act skill ro passive-skill">
+      <span class="sk-head"><span class="sk-nm">${d.passive.name}</span><span class="sk-cost">被动</span></span>
+      <span class="sk-desc">${d.passive.desc}</span></div>`;
+  }
   d.skills.forEach((sk, i) => {
     html += `<div class="act skill ro">
-      <span class="sk-head"><span class="sk-nm">${sk.name}</span><span class="sk-cost">${d.costs[i]} MP</span></span>
+      <span class="sk-head"><span class="sk-nm">${sk.name}</span><span class="sk-cost">${skillCostText(d, d.costs, i)} MP</span></span>
       <span class="sk-desc">${sk.desc}</span></div>`;
   });
   html += `<h2>语录</h2>
@@ -1476,10 +1707,35 @@ function cxWorldHtml() {
   </div>`;
 }
 
+function cxCardsHtml() {
+  const row = (id) => {
+    const d = CARDS[id];
+    return `<div class="cx-card ${d.kind}${d.passive ? ' passive' : ''}">
+      <span class="tc-ic">${cardSvg(id)}</span>
+      <span class="tc-main">
+        <span class="tc-nm">${d.name}<em>${d.en}</em>${d.passive ? '<i>持有</i>' : ''}</span>
+        <span class="tc-desc">${d.desc}</span>
+      </span></div>`;
+  };
+  const ids = Object.keys(CARDS);
+  return `<div class="cxd">
+    <h1><span>召唤战术牌</span></h1>
+    <div class="en">SUMMONING STRATEGY</div>
+    <div class="lore"><p>2022 年 9 月画在 Illustrator 设计稿里、却一直没有实装的卡牌系统。双方各有一副 32 张的牌库（每种两张）：开局 4 张手牌，每回合开始摸 1 张；一回合内可以打出任意张，但回合结束时手牌不能超过上限（默认 4 张，超出的最早获得的牌会被弃掉）。</p>
+    <p>标着「持有」的牌不能打出，放在手里就持续生效；物品卡需要指定一名角色。</p></div>
+    <h2>战术牌 · ${ids.filter(i => CARDS[i].kind === 'tac').length}</h2>
+    <div class="cx-cards">${ids.filter(i => CARDS[i].kind === 'tac').map(row).join('')}</div>
+    <h2>物品卡 · ${ids.filter(i => CARDS[i].kind === 'item').length}</h2>
+    <div class="cx-cards">${ids.filter(i => CARDS[i].kind === 'item').map(row).join('')}</div>
+  </div>`;
+}
+
 function renderCodex() {
   const heroIds = Object.keys(HEROES);
   let html = `<button class="cx-item ${cxSel === 'WORLD' ? 'sel' : ''}" data-id="WORLD" style="--dc:#8b9cff">
     <span class="dot"></span>拉文德市<span class="knd">世界观</span></button>
+    <button class="cx-item ${cxSel === 'CARDS' ? 'sel' : ''}" data-id="CARDS" style="--dc:#f6d365">
+    <span class="dot"></span>召唤战术牌<span class="knd">卡牌</span></button>
     <div class="cx-sep">英雄 · ${heroIds.length}</div>`;
   for (const id of heroIds) {
     const d = HEROES[id];
@@ -1490,7 +1746,7 @@ function renderCodex() {
   $('#cxList').querySelectorAll('.cx-item').forEach(b => {
     b.onclick = () => { cxSel = b.dataset.id; sfx.select(); renderCodex(); };
   });
-  $('#cxDetail').innerHTML = cxSel === 'WORLD' ? cxWorldHtml() : cxHeroHtml(HEROES[cxSel]);
+  $('#cxDetail').innerHTML = cxSel === 'WORLD' ? cxWorldHtml() : cxSel === 'CARDS' ? cxCardsHtml() : cxHeroHtml(HEROES[cxSel]);
   $('#cxDetail').scrollTop = 0;
 }
 
@@ -1505,6 +1761,7 @@ window.__g = {
   select: h => { ui.selected = h; renderPanel(); },
   cmd: (h, c) => clickCommand(h, c),
   target: h => clickTarget(h),
+  card: i => clickHandCard(i),
   end: () => $('#endTurn').click(),
   playing: () => playing,
 };

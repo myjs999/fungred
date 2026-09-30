@@ -16,20 +16,20 @@
 <header id="topbar">
   <div class="tb-left">
     <span class="logo">FUNGRED</span>
-    <span class="tb-turn">回合 <b id="turnNum">0</b></span>
+    <span class="tb-turn"><span class="lbl">回合 </span><b id="turnNum">0</b></span>
   </div>
   <div class="tb-right">
     <button id="codexBtn">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5V5a2 2 0 0 1 2-2h13v16H6.5A2.5 2.5 0 0 0 4 21.5v-2Z"/><path d="M19 19H6.5A2.5 2.5 0 0 0 4 21.5"/><path d="M9 7h7M9 10.5h5"/></svg>
-      百科
+      <span class="lbl">百科</span>
     </button>
     <span class="pts you">
       <svg viewBox="0 0 24 24" fill="none"><path d="M12 2 L19 9 L12 22 L5 9 Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" fill="currentColor" fill-opacity="0.25"/></svg>
-      我方召唤点 <b id="ptsYou">5</b>
+      <span class="lbl">我方召唤点 </span><b id="ptsYou">5</b>
     </span>
     <span class="pts ene">
       <svg viewBox="0 0 24 24" fill="none"><path d="M12 2 L19 9 L12 22 L5 9 Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" fill="currentColor" fill-opacity="0.25"/></svg>
-      敌方召唤点 <b id="ptsEne">5</b>
+      <span class="lbl">敌方召唤点 </span><b id="ptsEne">5</b><span class="lbl"> · 手牌 </span><span class="sm"> / </span><b id="eneHand">4</b>
     </span>
   </div>
 </header>
@@ -38,10 +38,16 @@
 
 <aside id="panel" class="hidden"></aside>
 
+<aside id="hand">
+  <div class="hand-head"><span>召唤战术牌</span><em id="handCount"></em></div>
+  <div id="handCards"></div>
+  <div class="hand-foot" id="handFoot"></div>
+</aside>
+
 <footer id="bottombar">
   <div id="jades"></div>
   <button id="endTurn">
-    结束回合
+    <span class="lbl-end">结束回合</span>
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
   </button>
 </footer>
